@@ -79,6 +79,7 @@ class Yanhuang(Postgres):
             "STRTOL": exp.FromBase.from_arg_list,
             "CAST": exp.Cast.from_arg_list,
             "CONCAT": exp.Concat.from_arg_list,
+            "CONTAINS": exp.Anonymous.from_arg_list,
         }
 
         NO_PAREN_FUNCTION_PARSERS = {
@@ -282,6 +283,11 @@ class Yanhuang(Postgres):
                 # 再检查无法降级的限制
                 self._check_correlated_subqueries(statement)
                 self._check_unsupported_window_features(statement)
+                self._check_unsupported_set_operations(statement)
+                self._check_distinct_limitations(statement)
+                self._check_delete_limitations(statement)
+                self._check_tablesample_limitations(statement)
+                self._check_table_ddl_limitations(statement)
             return statement
 
         def _apply_window_function_transforms(self, statement):
@@ -580,11 +586,6 @@ class Yanhuang(Postgres):
             # 简化：移除检测逻辑，交给_check_correlated_subqueries处理
             return super()._parse_in(this, is_global)
 
-        def _parse_exists(self) -> t.Optional[exp.Exists]:
-            """解析EXISTS子查询"""
-            # 简化：移除检测逻辑，交给_check_correlated_subqueries处理
-            return super()._parse_exists()
-
         def _has_correlated_reference(self, subquery: exp.Select, outer_alias: str) -> bool:
             """检查子查询是否包含对外层表别名的相关引用"""
             # 查找WHERE子句中的相关条件
@@ -613,6 +614,120 @@ class Yanhuang(Postgres):
             """查找指定类型的祖先节点"""
             # 这里是简化版实现，实际项目中可能需要更复杂的逻辑
             return None
+
+        def _check_unsupported_set_operations(self, statement):
+            """检查不支持的集合操作"""
+            # 检查INTERSECT和EXCEPT
+            for union_expr in statement.find_all(exp.Union):
+                if hasattr(union_expr, 'kind') and union_expr.kind:
+                    kind = str(union_expr.kind).upper()
+                    if kind == "INTERSECT":
+                        self.raise_error("炎凰SQL不支持INTERSECT集合操作，请使用UNION/UNION ALL")
+                    elif kind == "EXCEPT":
+                        self.raise_error("炎凰SQL不支持EXCEPT集合操作，请使用UNION/UNION ALL")
+            
+            # 检查Intersect和Except节点（如果存在）
+            for intersect_expr in statement.find_all(exp.Intersect):
+                self.raise_error("炎凰SQL不支持INTERSECT集合操作，请使用UNION/UNION ALL")
+            
+            for except_expr in statement.find_all(exp.Except):
+                self.raise_error("炎凰SQL不支持EXCEPT集合操作，请使用UNION/UNION ALL")
+
+        def _check_distinct_limitations(self, statement):
+            """检查DISTINCT使用限制"""
+            # 检查GROUP BY中的聚合函数DISTINCT限制
+            if isinstance(statement, exp.Select) and statement.args.get("group"):
+                # 在GROUP BY查询中，检查聚合函数
+                for expr in statement.expressions or []:
+                    self._check_aggregate_distinct_in_group_by(expr)
+                
+                # 检查HAVING子句中的聚合函数
+                if statement.args.get("having"):
+                    self._check_aggregate_distinct_in_group_by(statement.args["having"])
+
+        def _check_aggregate_distinct_in_group_by(self, expr):
+            """检查GROUP BY查询中的聚合函数DISTINCT限制"""
+            # 查找所有聚合函数
+            for agg_func in expr.find_all(exp.AggFunc):
+                if hasattr(agg_func, 'this') and isinstance(agg_func.this, exp.Distinct):
+                    # 检查是否是COUNT以外的聚合函数
+                    func_name = type(agg_func).__name__.upper()
+                    if func_name not in ('COUNT', 'APPROXDISTINCT', 'APPROXCOUNTDISTINCT'):
+                        self.raise_error(f"炎凰SQL在GROUP BY查询中仅支持COUNT(DISTINCT ...)，不支持{func_name}(DISTINCT ...)")
+            
+            # 特别检查一些常见的聚合函数类型
+            for sum_func in expr.find_all(exp.Sum):
+                if hasattr(sum_func, 'this') and isinstance(sum_func.this, exp.Distinct):
+                    self.raise_error("炎凰SQL在GROUP BY查询中不支持SUM(DISTINCT ...)，仅支持COUNT(DISTINCT ...)")
+            
+            for avg_func in expr.find_all(exp.Avg):
+                if hasattr(avg_func, 'this') and isinstance(avg_func.this, exp.Distinct):
+                    self.raise_error("炎凰SQL在GROUP BY查询中不支持AVG(DISTINCT ...)，仅支持COUNT(DISTINCT ...)")
+            
+            for min_func in expr.find_all(exp.Min):
+                if hasattr(min_func, 'this') and isinstance(min_func.this, exp.Distinct):
+                    self.raise_error("炎凰SQL在GROUP BY查询中不支持MIN(DISTINCT ...)，仅支持COUNT(DISTINCT ...)")
+            
+            for max_func in expr.find_all(exp.Max):
+                if hasattr(max_func, 'this') and isinstance(max_func.this, exp.Distinct):
+                    self.raise_error("炎凰SQL在GROUP BY查询中不支持MAX(DISTINCT ...)，仅支持COUNT(DISTINCT ...)")
+
+        def _check_delete_limitations(self, statement):
+            """检查DELETE语句限制"""
+            if isinstance(statement, exp.Delete):
+                # 检查RETURNING子句
+                if statement.args.get("returning"):
+                    self.raise_error("炎凰SQL的DELETE语句不支持RETURNING子句")
+                
+                # 检查USING子句
+                if statement.args.get("using"):
+                    self.raise_error("炎凰SQL的DELETE语句不支持USING子句")
+                
+                # 检查WITH子句（某些DELETE扩展）
+                if statement.args.get("with"):
+                    self.raise_error("炎凰SQL的DELETE语句不支持WITH子句")
+
+        def _check_tablesample_limitations(self, statement):
+            """检查TABLESAMPLE限制，炎凰SQL使用SAMPLE语法"""
+            # 检查TABLESAMPLE节点
+            for tablesample_expr in statement.find_all(exp.TableSample):
+                # 检查是否使用了PostgreSQL的TABLESAMPLE语法
+                if hasattr(tablesample_expr, 'method') and tablesample_expr.method:
+                    method = str(tablesample_expr.method).upper()
+                    if method in ('BERNOULLI', 'SYSTEM'):
+                        self.raise_error("炎凰SQL不支持TABLESAMPLE BERNOULLI/SYSTEM语法，请使用SAMPLE ROW/BLOCK语法")
+                else:
+                    # 如果有TABLESAMPLE但没有明确的方法，也报错
+                    self.raise_error("炎凰SQL不支持TABLESAMPLE语法，请使用SAMPLE ROW/BLOCK语法")
+
+        def _check_table_ddl_limitations(self, statement):
+            """检查CREATE/DROP TABLE语句限制"""
+            if isinstance(statement, exp.Create):
+                # 检查是否是CREATE TABLE
+                if isinstance(statement.this, exp.Schema):
+                    # 检查复杂的表定义特性
+                    schema = statement.this
+                    
+                    # 检查列约束
+                    if hasattr(schema, 'expressions') and schema.expressions:
+                        for column_def in schema.expressions:
+                            if hasattr(column_def, 'constraints') and column_def.constraints:
+                                for constraint in column_def.constraints:
+                                    constraint_type = type(constraint).__name__
+                                    if constraint_type not in ('NotNullColumnConstraint', 'DefaultColumnConstraint'):
+                                        self.raise_error(f"炎凰SQL不支持复杂列约束：{constraint_type}")
+                    
+                    # 检查表级约束
+                    if hasattr(statement, 'constraints') and statement.constraints:
+                        self.raise_error("炎凰SQL不支持表级约束，仅支持简单的CREATE TABLE语法")
+                    
+                    # 检查分区定义
+                    if hasattr(statement, 'partition_by') and statement.partition_by:
+                        self.raise_error("炎凰SQL不支持分区表，仅支持简单的CREATE TABLE语法")
+                    
+                    # 检查继承
+                    if hasattr(statement, 'inherits') and statement.inherits:
+                        self.raise_error("炎凰SQL不支持表继承，仅支持简单的CREATE TABLE语法")
 
     class Tokenizer(Postgres.Tokenizer):
         BIT_STRINGS = []

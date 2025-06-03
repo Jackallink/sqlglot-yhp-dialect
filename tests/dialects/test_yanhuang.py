@@ -142,4 +142,71 @@ class TestYanhuang(Validator):
         self.validate_raises("SELECT SUM(size) OVER (ORDER BY time RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) FROM main")
         
         # GROUPS框架（无法降级，应报错）
-        self.validate_raises("SELECT SUM(size) OVER (ORDER BY time GROUPS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) FROM main") 
+        self.validate_raises("SELECT SUM(size) OVER (ORDER BY time GROUPS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) FROM main")
+
+    def test_union_intersect_except(self):
+        """测试集合操作支持和限制"""
+        
+        # 支持的UNION和UNION ALL
+        self.validate_identity("SELECT method FROM main UNION SELECT action FROM logs")
+        self.validate_identity("SELECT method FROM main UNION ALL SELECT action FROM logs")
+        self.validate_identity("SELECT * FROM t1 UNION SELECT * FROM t2 UNION SELECT * FROM t3")
+        
+        # 不支持的INTERSECT和EXCEPT
+        self.validate_raises("SELECT method FROM main INTERSECT SELECT action FROM logs")
+        self.validate_raises("SELECT method FROM main EXCEPT SELECT action FROM logs")
+
+    def test_distinct_limitations(self):
+        """测试DISTINCT使用限制"""
+        
+        # 支持的SELECT DISTINCT
+        self.validate_identity("SELECT DISTINCT code AS status_code FROM main")
+        self.validate_identity("SELECT DISTINCT method, host FROM main")
+        
+        # 支持的非GROUP BY中的聚合DISTINCT
+        self.validate_identity("SELECT SUM(DISTINCT CAST(code AS INTEGER)) AS code_sum FROM main")
+        self.validate_identity("SELECT COUNT(DISTINCT customer_id) FROM main")
+        
+        # 支持的GROUP BY中的COUNT(DISTINCT)
+        self.validate_identity("SELECT method, COUNT(DISTINCT customer_id) FROM main GROUP BY method")
+        
+        # 不支持的GROUP BY中的其他聚合DISTINCT
+        self.validate_raises("SELECT method, SUM(DISTINCT CAST(code AS INTEGER)) AS code_sum FROM main GROUP BY method")
+        self.validate_raises("SELECT method, AVG(DISTINCT size) FROM main GROUP BY method")
+        self.validate_raises("SELECT method, MIN(DISTINCT size) FROM main GROUP BY method")
+        self.validate_raises("SELECT method, MAX(DISTINCT size) FROM main GROUP BY method")
+
+    def test_delete_limitations(self):
+        """测试DELETE语句限制"""
+        
+        # 支持的基本DELETE语句
+        self.validate_identity("DELETE FROM main WHERE id = 1")
+        
+        # 不支持的DELETE扩展
+        self.validate_raises("DELETE FROM main WHERE id = 1 RETURNING *")
+        self.validate_raises("DELETE FROM main USING customers WHERE main.customer_id = customers.id")
+
+    def test_sample_limitations(self):
+        """测试SAMPLE采样语法和TABLESAMPLE限制"""
+        
+        # 支持的SAMPLE语法（需要Generator支持才能测试完整功能）
+        # 暂时跳过完整的SAMPLE测试，因为需要在Generator中实现
+        
+        # 不支持的TABLESAMPLE语法
+        self.validate_raises("SELECT * FROM main TABLESAMPLE BERNOULLI (50)")
+        self.validate_raises("SELECT * FROM main TABLESAMPLE SYSTEM (25)")
+
+    def test_create_drop_table_limitations(self):
+        """测试CREATE/DROP TABLE语句限制"""
+        
+        # 支持的基本CREATE TABLE
+        self.validate_identity("CREATE TABLE test_table (id INTEGER, name VARCHAR(MAX))")
+        self.validate_identity("DROP TABLE test_table")
+        
+        # 支持的炎凰SQL特有ENGINE语法（如果解析器支持的话）
+        # 暂时注释掉，因为需要特殊的解析器支持
+        # self.validate_identity("CREATE TABLE test_event_set ENGINE=event_set")
+        # self.validate_identity("CREATE TABLE test_kafka_table ENGINE=kafka WITH (server_url='1.1.1.1')")
+        
+        # 不支持的复杂表特性（这些在sqlglot中可能需要特殊构造才能测试）
+        # 暂时跳过复杂约束测试，因为需要构造复杂的AST 
