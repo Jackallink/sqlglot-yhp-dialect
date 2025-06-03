@@ -144,3 +144,6 @@ sqlglot/_version.py
 
 # Emacs files
 *~
+
+# Cursor
+.cursor/

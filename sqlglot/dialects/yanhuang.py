@@ -274,14 +274,250 @@ class Yanhuang(Postgres):
             )
 
         def _parse_statement(self):
-            """重写_parse_statement以在解析完成后进行相关子查询检测"""
+            """重写_parse_statement以在解析完成后进行相关子查询检测和窗口函数转换"""
             statement = super()._parse_statement()
             if statement:
+                # 先应用兼容性转换（智能降级）
+                statement = self._apply_window_function_transforms(statement)
+                # 再检查无法降级的限制
                 self._check_correlated_subqueries(statement)
+                self._check_unsupported_window_features(statement)
             return statement
 
+        def _apply_window_function_transforms(self, statement):
+            """应用窗口函数兼容性转换（智能降级）"""
+            if not isinstance(statement, exp.Select):
+                return statement
+            
+            # 1. 转换ORDER BY中的窗口函数
+            statement = self._transform_order_by_window_functions(statement)
+            
+            # 2. 转换窗口函数运算表达式
+            statement = self._transform_window_function_arithmetic(statement)
+            
+            # 3. 转换WINDOW子句为内联OVER子句
+            statement = self._transform_window_clauses(statement)
+            
+            return statement
+
+        def _transform_order_by_window_functions(self, statement):
+            """转换ORDER BY中的窗口函数为子查询"""
+            if not statement.args.get("order"):
+                return statement
+            
+            window_expressions = []
+            for order_expr in statement.args["order"].expressions:
+                windows = list(order_expr.find_all(exp.Window))
+                if windows:
+                    window_expressions.extend(windows)
+            
+            if not window_expressions:
+                return statement
+            
+            # 创建窗口函数表达式别名
+            window_aliases = []
+            for i, window_expr in enumerate(window_expressions):
+                alias_name = f"__window_expr_{i + 1}"
+                window_aliases.append((window_expr, alias_name))
+            
+            # 修改SELECT投影，添加窗口函数
+            new_expressions = list(statement.expressions or [])
+            for window_expr, alias_name in window_aliases:
+                alias = self.expression(exp.Alias, this=window_expr.copy(), alias=alias_name)
+                new_expressions.append(alias)
+            
+            # 修改ORDER BY，替换窗口函数为别名引用
+            new_order_expressions = []
+            for order_expr in statement.args["order"].expressions:
+                new_expr = order_expr.copy()
+                # 使用transform方法来替换窗口函数
+                for window_expr, alias_name in window_aliases:
+                    def replace_window(node):
+                        if node == window_expr:
+                            return exp.Column(this=alias_name)
+                        return node
+                    new_expr = new_expr.transform(replace_window)
+                new_order_expressions.append(new_expr)
+            
+            # 创建子查询
+            inner_select = statement.copy()
+            inner_select.set("expressions", new_expressions)
+            inner_select.set("order", None)  # 移除内层ORDER BY
+            
+            # 创建外层查询
+            outer_select = self.expression(
+                exp.Select,
+                expressions=[exp.Star()],
+                **{"from": self.expression(exp.From, this=self.expression(exp.Subquery, this=inner_select, alias="__window_subquery"))}
+            )
+            
+            # 设置新的ORDER BY
+            outer_select.set("order", self.expression(exp.Order, expressions=new_order_expressions))
+            
+            # 保留其他子句（如LIMIT等）
+            for clause in ["limit", "offset"]:
+                if statement.args.get(clause):
+                    outer_select.set(clause, statement.args[clause])
+                    inner_select.set(clause, None)
+            
+            return outer_select
+
+        def _transform_window_function_arithmetic(self, statement):
+            """转换窗口函数运算表达式为子查询"""
+            window_expressions = []
+            
+            # 查找所有包含窗口函数运算的表达式
+            for expr in statement.expressions or []:
+                windows_in_arithmetic = self._find_window_arithmetic_expressions(expr)
+                window_expressions.extend(windows_in_arithmetic)
+            
+            if not window_expressions:
+                return statement
+            
+            # 为每个窗口函数创建别名
+            window_aliases = []
+            for i, window_expr in enumerate(window_expressions):
+                alias_name = f"__window_expr_{i + 1}"
+                window_aliases.append((window_expr, alias_name))
+            
+            # 修改SELECT投影
+            new_expressions = []
+            for expr in statement.expressions or []:
+                new_expr = expr.copy()
+                # 替换窗口函数运算为分离的表达式
+                for window_expr, alias_name in window_aliases:
+                    def replace_window(node):
+                        if node == window_expr:
+                            return exp.Column(this=alias_name)
+                        return node
+                    new_expr = new_expr.transform(replace_window)
+                new_expressions.append(new_expr)
+            
+            # 创建子查询
+            inner_select = statement.copy()
+            inner_select.set("expressions", [exp.Star()] + [
+                self.expression(exp.Alias, this=window_expr.copy(), alias=alias_name)
+                for window_expr, alias_name in window_aliases
+            ])
+            
+            # 创建外层查询
+            outer_select = self.expression(
+                exp.Select,
+                expressions=new_expressions,
+                **{"from": self.expression(exp.From, this=self.expression(exp.Subquery, this=inner_select, alias="__window_subquery"))}
+            )
+            
+            # 复制其他子句
+            for clause in ["where", "group", "having", "order", "limit", "offset"]:
+                if statement.args.get(clause):
+                    outer_select.set(clause, statement.args[clause])
+            
+            return outer_select
+
+        def _find_window_arithmetic_expressions(self, expr):
+            """查找表达式中的窗口函数运算"""
+            windows = []
+            
+            if isinstance(expr, exp.Binary):
+                # 检查左右操作数是否为窗口函数
+                if isinstance(expr.this, exp.Window):
+                    windows.append(expr.this)
+                if isinstance(expr.expression, exp.Window):
+                    windows.append(expr.expression)
+                # 递归检查子表达式
+                windows.extend(self._find_window_arithmetic_expressions(expr.this))
+                windows.extend(self._find_window_arithmetic_expressions(expr.expression))
+            elif isinstance(expr, exp.Unary):
+                if isinstance(expr.this, exp.Window):
+                    windows.append(expr.this)
+                windows.extend(self._find_window_arithmetic_expressions(expr.this))
+            elif hasattr(expr, 'expressions') and expr.expressions:
+                for sub_expr in expr.expressions:
+                    windows.extend(self._find_window_arithmetic_expressions(sub_expr))
+            elif hasattr(expr, 'args') and expr.args:
+                for key, value in expr.args.items():
+                    if isinstance(value, exp.Expression):
+                        windows.extend(self._find_window_arithmetic_expressions(value))
+                    elif isinstance(value, list):
+                        for item in value:
+                            if isinstance(item, exp.Expression):
+                                windows.extend(self._find_window_arithmetic_expressions(item))
+            
+            return windows
+
+        def _replace_window_in_arithmetic(self, expr, window_expr, alias_name):
+            """在运算表达式中替换窗口函数为列引用（已废弃，使用transform方法替代）"""
+            return expr
+
+        def _transform_window_clauses(self, statement):
+            """转换WINDOW子句为内联OVER子句"""
+            if not statement.args.get("windows"):
+                return statement
+            
+            # 获取WINDOW定义
+            window_definitions = {}
+            for window_def in statement.args["windows"]:
+                if hasattr(window_def, 'this'):
+                    # window_def是Window对象，this是窗口名
+                    window_name = str(window_def.this)
+                    window_definitions[window_name] = window_def
+            
+            # 在SELECT投影中查找窗口函数引用
+            new_expressions = []
+            for expr in statement.expressions or []:
+                def replace_window_refs(node):
+                    if isinstance(node, exp.Window):
+                        # 检查是否是窗口名引用（如 COUNT(*) OVER w）
+                        # 在这种情况下，alias字段存储的是窗口名引用
+                        if (hasattr(node, 'alias') and node.alias and 
+                            str(node.alias) in window_definitions and
+                            node.args.get('over') == 'OVER' and
+                            not node.args.get('partition_by') and 
+                            not node.args.get('order')):
+                            # 这是一个窗口引用，用窗口定义替换
+                            window_def = window_definitions[str(node.alias)]
+                            new_window = node.copy()
+                            # 复制窗口规格到新窗口函数
+                            if window_def.args.get('partition_by'):
+                                new_window.set('partition_by', window_def.args['partition_by'])
+                            if window_def.args.get('order'):
+                                new_window.set('order', window_def.args['order'])
+                            if window_def.args.get('spec'):
+                                new_window.set('spec', window_def.args['spec'])
+                            # 移除窗口名引用
+                            new_window.set('alias', None)
+                            return new_window
+                    return node
+                
+                new_expr = expr.transform(replace_window_refs)
+                new_expressions.append(new_expr)
+            
+            # 创建新的语句，移除WINDOW子句
+            new_statement = statement.copy()
+            new_statement.set("expressions", new_expressions)
+            new_statement.set("windows", None)
+            
+            return new_statement
+
+        def _replace_window_references(self, expr, window_definitions):
+            """替换窗口函数中的窗口引用为内联规格（已废弃，使用transform方法替代）"""
+            return expr
+
+        def _check_unsupported_window_features(self, statement):
+            """检查无法降级的窗口函数功能"""
+            # 只检查RANGE和GROUPS框架，其他功能已经通过转换支持
+            for window in statement.find_all(exp.Window):
+                if window.args.get("spec"):
+                    spec = window.args["spec"]
+                    if hasattr(spec, 'args') and spec.args.get("kind"):
+                        kind = str(spec.args["kind"]).upper()
+                        if kind == "RANGE":
+                            self.raise_error("炎凰SQL不支持RANGE窗口框架，请使用ROWS替代")
+                        elif kind == "GROUPS":
+                            self.raise_error("炎凰SQL不支持GROUPS窗口框架，请使用ROWS替代")
+
         def _check_correlated_subqueries(self, statement):
-            """检查AST中的相关子查询和EXISTS位置限制"""
+            """检查相关子查询和EXISTS位置限制"""
             # 检查EXISTS是否在WHERE子句之外
             if isinstance(statement, exp.Select):
                 # 检查SELECT投影中的EXISTS
@@ -310,6 +546,15 @@ class Yanhuang(Postgres):
                 if isinstance(exists_expr.this, exp.Select):
                     subquery = exists_expr.this
                     self._validate_subquery_correlation(subquery, "EXISTS")
+
+        # 移除旧的方法，保留必要的辅助方法
+        def _check_window_function_restrictions(self, statement):
+            """已废弃：使用 _apply_window_function_transforms 和 _check_unsupported_window_features 替代"""
+            pass
+
+        def _check_window_function_arithmetic(self, expr):
+            """已废弃：使用 _transform_window_function_arithmetic 替代"""
+            pass
 
         def _validate_subquery_correlation(self, subquery, subquery_type):
             """验证子查询是否包含相关引用"""
@@ -450,7 +695,6 @@ class Yanhuang(Postgres):
             exp.Hex: lambda self, e: self.func("UPPER", self.func("TO_HEX", self.sql(e, "this"))),
             exp.Select: transforms.preprocess(
                 [
-                    transforms.eliminate_window_clause,
                     transforms.eliminate_distinct_on,
                     transforms.eliminate_semi_and_anti_joins,
                     transforms.unqualify_unnest,
