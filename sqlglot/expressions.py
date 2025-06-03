@@ -5488,7 +5488,14 @@ class ToDouble(Func):
 
 
 class Columns(Func):
-    arg_types = {"this": True, "unpack": False}
+    # 增加炎凰SQL专用参数：except、replace、rename
+    arg_types = {
+        "this": True,           # 正则表达式
+        "unpack": False,        # 是否与*联合
+        "except": False,        # EXCEPT (字段列表)
+        "replace": False,       # REPLACE (表达式列表)
+        "rename": False,        # AS 批量重命名模式字符串
+    }
 
 
 # https://learn.microsoft.com/en-us/sql/t-sql/functions/cast-and-convert-transact-sql?view=sql-server-ver16#syntax
@@ -7440,7 +7447,7 @@ def except_(
 
     Args:
         expressions: the SQL code strings, corresponding to the `EXCEPT`'s operands.
-            If `Expression` instances are passed, they will be used as-is.
+            If `Expression` instance are passed, they will be used as-is.
         distinct: set the DISTINCT flag if and only if this is true.
         dialect: the dialect used to parse the input expression.
         copy: whether to copy the expression.

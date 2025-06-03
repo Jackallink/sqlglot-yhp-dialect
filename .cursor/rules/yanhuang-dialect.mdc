@@ -1,0 +1,57 @@
+---
+description: 
+globs: 
+alwaysApply: false
+---
+# 炎凰SQL方言开发与维护规则
+
+## 1. 继承体系
+- 主类继承自Postgres：`class Yanhuang(Postgres):`
+- 三大子类：
+  - `Parser(Postgres.Parser)`：负责创新语法解析
+  - `Generator(Postgres.Generator)`：负责SQL生成
+  - `Tokenizer(Postgres.Tokenizer)`：负责分词和关键字
+
+## 2. 设计原则
+- 主流程全部复用PG，只对创新/差异点做patch。
+- 所有创新语法都要有AST节点（exp.XXX），Parser和Generator都要支持。
+- 创新语法分支全部在Parser/Generator中用if/字典patch，不要全量重写。
+- 类型、关键字、函数等用字典增量扩展。
+
+## 3. 典型创新语法实现
+- **APPLY（表函数/子查询增强）**：
+  - Parser重载`_parse_table`，检测`APPLY`，分为表函数和子查询两种分支，子查询用`_parse_select(nested=True, parse_subquery_alias=False)`，别名由外层消费。
+  - Generator重载`join_sql`，遇到`exp.Lateral`节点输出`APPLY`/`OUTER APPLY`等。
+  - AST用`exp.Lateral`+`exp.Subquery`表达APPLY子查询。
+- **COLUMNS/EXCEPT/REPLACE/AS**：
+  - Parser重载`_parse_projection`，检测`COLUMNS`，完整消费EXCEPT/REPLACE/AS分支，所有token都在本分支内消费。
+  - Generator重载`columns_sql`，拼接`COLUMNS(...) EXCEPT (...) REPLACE (...) AS ...`。
+  - AST用`exp.Columns`节点，带`except`、`replace`、`alias`参数。
+- **IN/EXISTS子查询（非相关子查询）**：
+  - Parser重载`_parse_in`、`_parse_exists`，检测相关子查询，遇到引用外层表字段时报错。
+  - AST用`exp.In`、`exp.Exists`节点。
+- **CTE（禁止WITH RECURSIVE）**：
+  - Parser重载`_parse_cte`，遇到`WITH RECURSIVE`时报错。
+- **DELETE/DESCRIBE/类型系统/窗口函数等**：
+  - Parser/Generator按需重载相关分支，遇到炎凰不支持的类型/语法时报错。
+
+## 4. 代码结构建议
+- Parser：所有创新语法分支都在本地重载，主流程全部走PG。
+- Generator：所有创新SQL生成分支都在本地重载，主流程全部走PG。
+- Tokenizer：增量扩展关键字、类型、特殊符号。
+
+## 5. 开发Tips
+- 先实现Parser/Generator的最小patch，保证主流程能跑通。
+- 每加一个创新语法，先写AST节点和最小测试用例，再补全Parser/Generator分支。
+- 遇到复杂token推进问题，调试游标和token流，确保所有创新token都在本地分支内消费完毕。
+- 充分利用PG主流程，能不重写就不重写。
+
+## 6. 推荐开发顺序
+1. 先实现APPLY、COLUMNS/EXCEPT/REPLACE、IN/EXISTS、CTE等主创新语法。
+2. 再补充类型系统、DELETE、DESCRIBE、窗口函数等边界。
+3. 最后补充关键字、类型、函数等字典映射。
+
+## 7. AST与SQL双向一致性
+- 每个创新语法都要有AST节点，Parser和Generator都要支持。
+- AST节点的参数（args）要完整表达SQL语义。
+- 测试用例要覆盖SQL→AST→SQL的全链路，确保SQL文本和AST互相转换不会丢失语义。

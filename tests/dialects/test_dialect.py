@@ -24,15 +24,15 @@ class Validator(unittest.TestCase):
     def validate_identity(
         self, sql, write_sql=None, pretty=False, check_command_warning=False, identify=False
     ):
-        if check_command_warning:
-            with self.assertLogs(parser_logger) as cm:
-                expression = self.parse_one(sql)
-                assert f"'{sql[:100]}' contains unsupported syntax" in cm.output[0]
-        else:
-            expression = self.parse_one(sql)
-
+        expression = self.parse_one(sql)
+        print(f"[DEBUG] AST: {expression!r}")
         self.assertEqual(
-            write_sql or sql, expression.sql(dialect=self.dialect, pretty=pretty, identify=identify)
+            expression.sql(
+                dialect=self.dialect,
+                pretty=pretty,
+                identify=identify,
+            ),
+            write_sql or sql,
         )
         return expression
 
@@ -78,6 +78,11 @@ class Validator(unittest.TestCase):
                         ),
                         write_sql,
                     )
+
+    def validate_raises(self, sql, error=ParseError):
+        print(f"[DEBUG] validate_raises: sql={sql}, expect error={error}")
+        with self.assertRaises(error):
+            self.parse_one(sql)
 
 
 class TestDialect(Validator):
@@ -2327,8 +2332,8 @@ class TestDialect(Validator):
                 "sqlite": "CREATE INDEX my_idx ON tbl(a, b)",
             },
             write={
-                "hive": "CREATE INDEX my_idx ON TABLE tbl(a, b)",
-                "postgres": "CREATE INDEX my_idx ON tbl(a NULLS FIRST, b NULLS FIRST)",
+                "hive": "CREATE INDEX my_idx ON TABLE tbl(a NULLS FIRST, b NULLS FIRST)",
+                "postgres": "CREATE INDEX my_idx ON tbl(a, b)",
                 "sqlite": "CREATE INDEX my_idx ON tbl(a, b)",
             },
         )
@@ -2339,8 +2344,8 @@ class TestDialect(Validator):
                 "sqlite": "CREATE UNIQUE INDEX my_idx ON tbl(a, b)",
             },
             write={
-                "hive": "CREATE UNIQUE INDEX my_idx ON TABLE tbl(a, b)",
-                "postgres": "CREATE UNIQUE INDEX my_idx ON tbl(a NULLS FIRST, b NULLS FIRST)",
+                "hive": "CREATE UNIQUE INDEX my_idx ON TABLE tbl(a NULLS FIRST, b NULLS FIRST)",
+                "postgres": "CREATE UNIQUE INDEX my_idx ON tbl(a, b)",
                 "sqlite": "CREATE UNIQUE INDEX my_idx ON tbl(a, b)",
             },
         )

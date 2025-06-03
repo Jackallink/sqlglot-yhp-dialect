@@ -4,7 +4,7 @@ SQLGlot is a no-dependency SQL parser, transpiler, optimizer, and engine. It can
 
 It is a very comprehensive generic SQL parser with a robust [test suite](https://github.com/tobymao/sqlglot/blob/main/tests/). It is also quite [performant](#benchmarks), while being written purely in Python.
 
-You can easily [customize](#custom-dialects) the parser, [analyze](#metadata) queries, traverse expression trees, and programmatically [build](#build-and-modify-sql) SQL.
+You can easily [customize](#custom-dialects) the parser, [analyze](#metadata) queries, traverse expression treessqlglot/dialects/postgres.py, and programmatically [build](#build-and-modify-sql) SQL.
 
 SQLGlot can detect a variety of [syntax errors](#parser-errors), such as unbalanced parentheses, incorrect usage of reserved keywords, and so on. These errors are highlighted and dialect incompatibilities can warn or raise depending on configurations.
 
@@ -14,26 +14,27 @@ Contributions are very welcome in SQLGlot; read the [contribution guide](https:/
 
 ## Table of Contents
 
-* [Install](#install)
-* [Versioning](#versioning)
-* [Get in Touch](#get-in-touch)
-* [FAQ](#faq)
-* [Examples](#examples)
-   * [Formatting and Transpiling](#formatting-and-transpiling)
-   * [Metadata](#metadata)
-   * [Parser Errors](#parser-errors)
-   * [Unsupported Errors](#unsupported-errors)
-   * [Build and Modify SQL](#build-and-modify-sql)
-   * [SQL Optimizer](#sql-optimizer)
-   * [AST Introspection](#ast-introspection)
-   * [AST Diff](#ast-diff)
-   * [Custom Dialects](#custom-dialects)
-   * [SQL Execution](#sql-execution)
-* [Used By](#used-by)
-* [Documentation](#documentation)
-* [Run Tests and Lint](#run-tests-and-lint)
-* [Benchmarks](#benchmarks)
-* [Optional Dependencies](#optional-dependencies)
+- [Table of Contents](#table-of-contents)
+- [Install](#install)
+- [Versioning](#versioning)
+- [Get in Touch](#get-in-touch)
+- [FAQ](#faq)
+- [Examples](#examples)
+  - [Formatting and Transpiling](#formatting-and-transpiling)
+  - [Metadata](#metadata)
+  - [Parser Errors](#parser-errors)
+  - [Unsupported Errors](#unsupported-errors)
+  - [Build and Modify SQL](#build-and-modify-sql)
+  - [SQL Optimizer](#sql-optimizer)
+  - [AST Introspection](#ast-introspection)
+  - [AST Diff](#ast-diff)
+  - [Custom Dialects](#custom-dialects)
+  - [SQL Execution](#sql-execution)
+- [Used By](#used-by)
+- [Documentation](#documentation)
+- [Run Tests and Lint](#run-tests-and-lint)
+- [Benchmarks](#benchmarks)
+- [Optional Dependencies](#optional-dependencies)
 
 ## Install
 

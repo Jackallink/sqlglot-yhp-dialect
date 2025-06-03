@@ -1,0 +1,39 @@
+---
+description: 
+globs: 
+alwaysApply: false
+---
+# 炎凰SQL方言开发规范（基于sqlglot）
+
+## 1. 继承与扩展
+- 新方言应在 `sqlglot/dialects/yanhuang.py` 下实现，继承自 `Postgres` 方言。
+- 只重写/扩展炎凰SQL与Postgres差异化的部分，最大化代码复用。
+
+## 2. 解析器（Parser）扩展
+- 通过重写 `Parser` 的相关方法（如 `_parse_projection`, `_parse_table`, `_parse_function` 等）实现炎凰SQL专有语法。
+- 支持批量投影（COLUMNS）、正则重命名、APPLY、SAMPLE、类型系统等炎凰特色。
+- 参数解析应兼容 VAR、IDENTIFIER、QUOTED_IDENTIFIER 等所有字段名token。
+
+## 3. AST节点扩展
+- 如需表达新语法（如COLUMNS、APPLY），可在 `sqlglot/expressions.py` 扩展AST节点或参数。
+- 遵循sqlglot的arg_types和表达式注册机制。
+
+## 4. 生成器（Generator）扩展
+- 通过重写 `Generator` 的相关方法（如 `columns_sql`, `join_sql`, `lateral_op` 等）将AST节点正确还原为炎凰SQL语法。
+- 保证生成SQL与炎凰官方文档一致。
+
+## 5. 测试驱动开发
+- 所有差异化语法点都应在 `tests/dialects/test_yanhuang.py` 补充单元测试。
+- 参考其它方言的测试结构，保证覆盖率和一致性。
+
+## 6. 兼容性与降级
+- 能兼容主流SQL的地方尽量兼容，遇到炎凰专有创新点才做定制。
+- 不支持的写法应优先降级实现，无法降级的及时报错或降级提示。
+
+## 7. 文档与代码同步
+- 代码实现严格对照 [needRefrences/yh_sql_syntax2.19.md](mdc:needRefrences/yh_sql_syntax2.19.md) 和 [needRefrences/yhp_pg_sql_diff.md](mdc:needRefrences/yhp_pg_sql_diff.md)。
+- 重要语法点和边界应有注释说明。
+
+---
+
+> 本规则适用于炎凰SQL方言的长期维护和团队协作，确保最大兼容性、可扩展性和创新性。

@@ -92,6 +92,7 @@ DIALECTS = [
     "Teradata",
     "Trino",
     "TSQL",
+    "Yanhuang",
 ]
 
 MODULE_BY_DIALECT = {name: name.lower() for name in DIALECTS}
@@ -116,3 +117,5 @@ def __getattr__(name):
         return getattr(module, name)
 
     raise AttributeError(f"module {__name__} has no attribute {name}")
+
+# from sqlglot.dialects.yanhuang import Yanhuang
