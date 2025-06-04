@@ -605,14 +605,9 @@ class Yanhuang(Postgres):
             if statement is None:
                 return None
                 
-            def check_node(node):
-                if isinstance(node, exp.TableSample):
-                    # Yanhuang SQL不支持TABLESAMPLE，只支持SAMPLE
-                    self.raise_error("TABLESAMPLE is not supported in Yanhuang SQL, use SAMPLE instead")
-                
-                return node
-            
-            return statement.transform(check_node)
+            # 炎凰SQL现在支持SAMPLE语法，不再需要检查TableSample
+            # 只检查原始的TABLESAMPLE关键字使用（这个在tokenizer层面处理）
+            return statement
 
         def _check_distinct_limitations(self, statement):
             """检查DISTINCT使用限制"""
@@ -953,11 +948,55 @@ class Yanhuang(Postgres):
 
             return this
 
+        def _parse_table_sample(self, as_modifier: bool = False) -> t.Optional[exp.TableSample]:
+            """解析SAMPLE语法，支持炎凰SQL的SAMPLE ROW|BLOCK语法"""
+            # 检查是否是TABLESAMPLE关键字，如果是则拒绝
+            if self._match_texts(["TABLESAMPLE"]):
+                self.raise_error("炎凰SQL不支持TABLESAMPLE语法，请使用SAMPLE语法")
+            
+            # 消费SAMPLE token
+            if not self._match(TokenType.TABLE_SAMPLE):
+                return None
+            
+            # 解析采样方法：ROW 或 BLOCK
+            method = None
+            if self._match(TokenType.ROW) or self._match_texts(["BERNOULLI"]):
+                method = exp.var("ROW")
+            elif self._match_texts(["BLOCK"]) or self._match_texts(["SYSTEM"]):
+                method = exp.var("BLOCK")
+            else:
+                # 如果没有指定方法，默认为ROW
+                method = exp.var("ROW")
+            
+            # 解析概率值
+            if not self._match(TokenType.L_PAREN):
+                self.raise_error("SAMPLE语法需要括号包围概率值")
+            
+            percent = self._parse_number()
+            if not percent:
+                self.raise_error("SAMPLE语法需要指定概率值")
+            
+            if not self._match(TokenType.R_PAREN):
+                self.raise_error("SAMPLE语法缺少右括号")
+            
+            return self.expression(
+                exp.TableSample,
+                method=method,
+                percent=percent
+            )
+
     class Tokenizer(Postgres.Tokenizer):
         BIT_STRINGS = []
         HEX_STRINGS = []
+        BYTE_STRINGS = []
         STRING_ESCAPES = ["\\", "'"]
-
+        
+        # 支持炎凰SQL的字符串前缀
+        PREFIXED_STRINGS = {
+            "E": TokenType.STRING,  # C-style转义字符串
+            "U&": TokenType.STRING,  # Unicode编码字符串
+        }
+        
         KEYWORDS = {
             **Postgres.Tokenizer.KEYWORDS,
             "(+)": TokenType.JOIN_MARKER,
@@ -969,6 +1008,8 @@ class Yanhuang(Postgres):
             "VARBYTE": TokenType.VARBINARY,
             "BINARY VARYING": TokenType.VARBINARY,
             "APPLY": TokenType.APPLY,
+            "SAMPLE": TokenType.TABLE_SAMPLE,  # 将SAMPLE映射到TABLE_SAMPLE token
+            "TABLESAMPLE": TokenType.COMMAND,  # 将TABLESAMPLE映射到COMMAND，后续会被拒绝
         }
         KEYWORDS.pop("VALUES")
 
@@ -1044,7 +1085,7 @@ class Yanhuang(Postgres):
             exp.SortKeyProperty: lambda self, e: f"{'COMPOUND ' if e.args['compound'] else ''}SORTKEY({self.format_args(*e.this)})",
             exp.StartsWith: lambda self, e: f"{self.sql(e.this)} LIKE {self.sql(e.expression)} || '%'",
             exp.StringToArray: rename_func("SPLIT_TO_ARRAY"),
-            exp.TableSample: no_tablesample_sql,
+            exp.TableSample: lambda self, e: self.tablesample_sql(e),
             exp.TsOrDsAdd: date_delta_sql("DATEADD"),
             exp.TsOrDsDiff: date_delta_sql("DATEDIFF"),
             exp.UnixToTime: lambda self, e: f"(TIMESTAMP 'epoch' + {self.sql(e.this)} * INTERVAL '1 SECOND')",
@@ -1676,3 +1717,30 @@ class Yanhuang(Postgres):
                     group_items.append(self.sql(expr))
             
             return f"GROUP BY {', '.join(group_items)}"
+
+        def tablesample_sql(
+            self,
+            expression: exp.TableSample,
+            tablesample_keyword: t.Optional[str] = None,
+        ) -> str:
+            """生成SAMPLE语句SQL，支持炎凰SQL的SAMPLE语法"""
+            method = self.sql(expression, "method")
+            method_name = method.upper() if method else ""
+            
+            # 炎凰SQL使用SAMPLE关键字，不是TABLESAMPLE
+            keyword = "SAMPLE"
+            
+            # 处理方法名
+            if method_name in ("ROW", "BERNOULLI"):
+                method_sql = "ROW"
+            elif method_name in ("BLOCK", "SYSTEM"):
+                method_sql = "BLOCK"
+            else:
+                method_sql = method_name if method_name else "ROW"  # 默认ROW
+            
+            # 处理概率值
+            percent = self.sql(expression, "percent")
+            if not percent:
+                percent = "100"  # 默认100%
+            
+            return f" {keyword} {method_sql} ({percent})"
