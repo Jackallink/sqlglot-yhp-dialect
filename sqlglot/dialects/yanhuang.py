@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import typing as t
 
-from sqlglot import exp, transforms
+from sqlglot import exp, transforms, tokens
 from sqlglot.dialects.dialect import (
     NormalizationStrategy,
     concat_to_dpipe_sql,
@@ -988,14 +988,15 @@ class Yanhuang(Postgres):
     class Tokenizer(Postgres.Tokenizer):
         BIT_STRINGS = []
         HEX_STRINGS = []
-        BYTE_STRINGS = []
+        BYTE_STRINGS = [("e'", "'"), ("E'", "'")]  # E前缀字符串，用于C-style转义
         STRING_ESCAPES = ["\\", "'"]
         
-        # 支持炎凰SQL的字符串前缀
-        PREFIXED_STRINGS = {
-            "E": TokenType.STRING,  # C-style转义字符串
-            "U&": TokenType.STRING,  # Unicode编码字符串
-        }
+        # 支持炎凰SQL的Unicode字符串前缀
+        UNICODE_STRINGS = [
+            (prefix + q, q)
+            for q in t.cast(t.List[str], tokens.Tokenizer.QUOTES)
+            for prefix in ("U&", "u&")  # Unicode编码字符串
+        ]
         
         KEYWORDS = {
             **Postgres.Tokenizer.KEYWORDS,
@@ -1090,6 +1091,9 @@ class Yanhuang(Postgres):
             exp.TsOrDsDiff: date_delta_sql("DATEDIFF"),
             exp.UnixToTime: lambda self, e: f"(TIMESTAMP 'epoch' + {self.sql(e.this)} * INTERVAL '1 SECOND')",
             exp.Union: lambda self, e: self.union_sql(e),
+            # 字符串转义支持
+            exp.ByteString: lambda self, e: self.bytestring_sql(e),
+            exp.UnicodeString: lambda self, e: self.unicodestring_sql(e),
         }
 
         # Postgres maps exp.Pivot to no_pivot_sql, but Redshift support pivots
@@ -1723,24 +1727,46 @@ class Yanhuang(Postgres):
             expression: exp.TableSample,
             tablesample_keyword: t.Optional[str] = None,
         ) -> str:
-            """生成SAMPLE语句SQL，支持炎凰SQL的SAMPLE语法"""
-            method = self.sql(expression, "method")
-            method_name = method.upper() if method else ""
+            """
+            生成SAMPLE语法的SQL，支持炎凰SQL的SAMPLE语法
+            """
+            method = expression.args.get("method")
+            percent = expression.args.get("percent")
             
-            # 炎凰SQL使用SAMPLE关键字，不是TABLESAMPLE
-            keyword = "SAMPLE"
+            if not method or not percent:
+                return ""
             
-            # 处理方法名
-            if method_name in ("ROW", "BERNOULLI"):
-                method_sql = "ROW"
-            elif method_name in ("BLOCK", "SYSTEM"):
-                method_sql = "BLOCK"
+            # 将method转换为炎凰SQL支持的格式
+            method_name = method.name if hasattr(method, 'name') else str(method)
+            if method_name.upper() in ("BERNOULLI", "ROW"):
+                method_name = "ROW"
+            elif method_name.upper() in ("SYSTEM", "BLOCK"):
+                method_name = "BLOCK"
             else:
-                method_sql = method_name if method_name else "ROW"  # 默认ROW
+                method_name = "ROW"  # 默认使用ROW
             
-            # 处理概率值
-            percent = self.sql(expression, "percent")
-            if not percent:
-                percent = "100"  # 默认100%
+            percent_value = self.sql(percent)
+            return f" SAMPLE {method_name} ({percent_value})"
+
+        def bytestring_sql(self, expression: exp.ByteString) -> str:
+            """
+            生成E前缀字符串的SQL，用于C-style转义字符
+            """
+            string_value = expression.this
+            # 转义字符串中的特殊字符
+            escaped_string = self.escape_str(string_value)
+            return f"E'{escaped_string}'"
+
+        def unicodestring_sql(self, expression: exp.UnicodeString) -> str:
+            """
+            生成U&前缀字符串的SQL，用于Unicode编码
+            """
+            string_value = self.sql(expression, "this")
+            escape = expression.args.get("escape")
             
-            return f" {keyword} {method_sql} ({percent})"
+            if escape:
+                escape_sql = f" UESCAPE {self.sql(escape)}"
+            else:
+                escape_sql = ""
+            
+            return f"U&'{string_value}'{escape_sql}"
