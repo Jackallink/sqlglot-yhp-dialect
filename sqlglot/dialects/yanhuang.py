@@ -276,6 +276,7 @@ class Yanhuang(Postgres):
             TokenType.DESCRIBE: lambda self: self._parse_describe(),
             TokenType.VALUES: lambda self: self._parse_values(),
             TokenType.SHOW: lambda self: self._parse_show(),
+            TokenType.PIVOT: lambda self: self._parse_pivot_statement(),
         }
 
         SUPPORTS_IMPLICIT_UNNEST = True
@@ -400,9 +401,24 @@ class Yanhuang(Postgres):
 
         def _parse_projections(self) -> t.List[exp.Expression]:
             if self._match_texts(["COLUMNS"]):
-                # COLUMNS('regex')
-                this = self._parse_wrapped(self._parse_string)
+                # COLUMNS('regex') 或 COLUMNS("regex")
+                if not self._match(TokenType.L_PAREN):
+                    self.raise_error("COLUMNS后必须跟左括号")
+                
+                # 解析COLUMNS的参数 - 可以是字符串或标识符
+                if self._curr and self._curr.token_type == TokenType.STRING:
+                    this = self._parse_string()
+                elif self._curr and self._curr.token_type == TokenType.IDENTIFIER:
+                    # 处理双引号标识符作为字符串
+                    this = self._parse_id_var()
+                else:
+                    self.raise_error("COLUMNS参数必须是字符串")
+                
+                if not self._match(TokenType.R_PAREN):
+                    self.raise_error("COLUMNS缺少右括号")
+                
                 columns = self.expression(exp.Columns, this=this)
+                
                 # EXCEPT (f1, f2)
                 if self._match_texts(["EXCEPT"]):
                     self._match_l_paren()
@@ -440,7 +456,25 @@ class Yanhuang(Postgres):
                         except:
                             self.raise_error("COLUMNS AS后必须为字符串或标识符")
                     columns.set("alias", alias)
-                return [columns]
+                
+                # 开始处理投影列表，COLUMNS是第一个
+                projections = [columns]
+                
+                # 继续解析后续的投影表达式
+                while self._match(TokenType.COMMA):
+                    expr = self._parse_expression()
+                    if expr is None:
+                        break
+                    
+                    # 使用 _parse_alias 处理别名
+                    alias = self._parse_alias(expr)
+                    if alias:
+                        projections.append(alias)
+                    else:
+                        projections.append(expr)
+                
+                return projections
+                
             # 其它主流投影走PG，但补充省略AS的写法
             projections = []
             while True:
@@ -1198,10 +1232,8 @@ class Yanhuang(Postgres):
             if group_by:
                 group_expr = self.expression(exp.Group, expressions=group_by)
             
-            # 解析ORDER BY子句
-            order_by = None
-            if self._match(TokenType.ORDER_BY):
-                order_by = self._parse_order(skip_order_token=True)
+            # 解析ORDER BY子句 - 修复：使用正确的方法解析ORDER BY
+            order_by = self._parse_order()
             
             # 创建PIVOT表达式
             pivot = self.expression(
@@ -1368,7 +1400,7 @@ class Yanhuang(Postgres):
         # 支持炎凰SQL的Unicode字符串前缀
         UNICODE_STRINGS = [
             (prefix + q, q)
-            for q in t.cast(t.List[str], tokens.Tokenizer.QUOTES)
+            for q in ["'", '"']  # 明确支持单引号和双引号
             for prefix in ("U&", "u&")  # Unicode编码字符串
         ]
         
@@ -2154,19 +2186,22 @@ class Yanhuang(Postgres):
             return f"E'{escaped_string}'"
 
         def unicodestring_sql(self, expression: exp.UnicodeString) -> str:
-            """生成Unicode字符串SQL"""
-            prefix = "U&"
-            quote_char = "'"  # 使用固定的单引号
+            """生成Unicode字符串SQL，修复基类的regex错误"""
             value = expression.this
-            
-            # 处理UESCAPE
             escape_char = expression.args.get("escape")
+            
+            # 生成 U&'value' 或 U&'value' UESCAPE 'char' 格式
             if escape_char:
-                # escape_char可能是Literal对象，需要获取其值
-                escape_value = escape_char.this if hasattr(escape_char, 'this') else escape_char
-                return f"{prefix}{quote_char}{value}{quote_char} UESCAPE {quote_char}{escape_value}{quote_char}"
+                # 获取转义字符的值
+                if hasattr(escape_char, 'this'):
+                    escape_value = escape_char.this
+                elif hasattr(escape_char, 'name'):
+                    escape_value = escape_char.name
+                else:
+                    escape_value = str(escape_char)
+                return f"U&'{value}' UESCAPE '{escape_value}'"
             else:
-                return f"{prefix}{quote_char}{value}{quote_char}"
+                return f"U&'{value}'"
                 
         def show_sql(self, expression: exp.Show) -> str:
             """生成SHOW语句SQL"""
