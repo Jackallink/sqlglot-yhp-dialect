@@ -79,13 +79,29 @@ def test_function_support():
         ],
         "炎凰SQL特有函数": [
             "SELECT CONTAINS('keyword') FROM main",
-            "SELECT TIME_BUCKET('1h', timestamp) FROM main",
+            "SELECT TIME_BUCKET('1h', ts) FROM main",
             "SELECT REGEX_EXTRACT('abc123', '[0-9]+') FROM main",
             "SELECT REGEX_MATCH('abc', '[a-z]+') FROM main",
             "SELECT IP_TO_COUNTRY('192.168.1.1') FROM main",
             "SELECT IP_TO_REGION('192.168.1.1') FROM main",
             "SELECT IP_TO_CITY('192.168.1.1') FROM main",
             "SELECT GEOHASH(39.9, 116.4, 8) FROM main",
+        ],
+        "聚合函数（补充）": [
+            "SELECT MAX_STR(name) FROM main",
+            "SELECT MIN_STR(name) FROM main", 
+            "SELECT STDDEV_POP(value) FROM main",
+            "SELECT STDDEV_SAMP(value) FROM main",
+            "SELECT VAR_POP(value) FROM main",
+            "SELECT VAR_SAMP(value) FROM main",
+            "SELECT STRING_AGG(name, ',') FROM main",
+            "SELECT QUANTILE_T_DIGEST(value, 0.5) FROM main",
+            "SELECT PERCENTILE(value, 0.5) FROM main",
+            "SELECT APPROX_COUNT_DISTINCT(id) FROM main",
+            "SELECT APPROX_MEDIAN(value) FROM main",
+            "SELECT PRODUCT(value) FROM main",
+            "SELECT LATEST_VALUE(name) FROM main",
+            "SELECT EARLIEST_VALUE(name) FROM main",
         ]
     }
     

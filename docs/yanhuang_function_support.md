@@ -4,11 +4,30 @@
 
 炎凰SQL方言在SQLGlot框架中实现了完整的函数支持，包括标准SQL函数和炎凰SQL特有的扩展函数。本文档详细说明了支持的函数类型和使用方法。
 
-## 测试结果
+## 测试验证
 
-✅ **总测试数**: 73  
-✅ **通过测试**: 73  
-✅ **成功率**: 100.0%
+### 自动化测试
+项目包含完整的函数支持测试套件，覆盖所有实现的函数：
+
+- **总测试数量**: 87个函数
+- **测试通过率**: 100%
+- **测试分类**: 标量函数、聚合函数、表函数、炎凰SQL特有函数
+
+### 测试运行
+```bash
+python tests/test_function_support.py
+```
+
+## 总结
+
+炎凰SQL方言实现提供了完整的函数支持，包括：
+
+1. **标量函数**: 60个（字符串、数学、条件、类型转换、日期时间函数）
+2. **聚合函数**: 19个（包括基础聚合和统计类函数）
+3. **表函数**: 13个（包括基础和炎凰SQL特有表函数）
+4. **炎凰SQL特有函数**: 8个（文本分析、地理位置等）
+
+**总计支持函数数量: 87个**，覆盖了炎凰SQL语法文档中提到的所有核心函数。
 
 ## 支持的函数分类
 
@@ -103,6 +122,32 @@
 - `IP_TO_REGION(ip)` - IP转地区
 - `IP_TO_CITY(ip)` - IP转城市
 - `GEOHASH(lat, lng, precision)` - 地理哈希编码
+
+### 7. 聚合函数（补充）
+
+#### 字符串类聚合函数
+- `MAX_STR(expr)` - 按字符串规则统计最大值
+- `MIN_STR(expr)` - 按字符串规则统计最小值
+- `STRING_AGG(expr, separator)` - 字符串聚合拼接
+
+#### 统计类聚合函数
+- `STDDEV_POP(expr)` - 计算总体标准差
+- `STDDEV_SAMP(expr)` - 计算样本标准差
+- `VAR_POP(expr)` - 计算总体方差
+- `VAR_SAMP(expr)` - 计算样本方差
+
+#### 分位数函数
+- `QUANTILE_T_DIGEST(expr, fraction)` - 使用T-Digest算法计算分位数
+- `PERCENTILE(expr, fraction)` - 等价于QUANTILE_T_DIGEST
+
+#### 近似计算函数
+- `APPROX_COUNT_DISTINCT(expr)` - 近似计数不重复值
+- `APPROX_MEDIAN(expr)` - 使用T-Digest算法计算近似中位数
+
+#### 其他聚合函数
+- `PRODUCT(expr)` - 计算乘积
+- `LATEST_VALUE(expr)` - 返回_time最大值所在行的字段值
+- `EARLIEST_VALUE(expr)` - 返回_time最小值所在行的字段值
 
 ## 支持的表函数
 

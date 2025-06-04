@@ -127,6 +127,22 @@ class Yanhuang(Postgres):
             "IP_TO_CITY": lambda args: exp.Anonymous(this="IP_TO_CITY", expressions=args),
             "GEOHASH": lambda args: exp.Anonymous(this="GEOHASH", expressions=args),
             
+            # 补充遗漏的聚合函数（根据炎凰SQL语法文档）
+            "MAX_STR": lambda args: exp.Anonymous(this="MAX_STR", expressions=args),
+            "MIN_STR": lambda args: exp.Anonymous(this="MIN_STR", expressions=args),
+            "STDDEV_POP": lambda args: exp.Anonymous(this="STDDEV_POP", expressions=args),
+            "STDDEV_SAMP": lambda args: exp.Anonymous(this="STDDEV_SAMP", expressions=args),
+            "VAR_POP": lambda args: exp.Anonymous(this="VAR_POP", expressions=args),
+            "VAR_SAMP": lambda args: exp.Anonymous(this="VAR_SAMP", expressions=args),
+            "STRING_AGG": lambda args: exp.Anonymous(this="STRING_AGG", expressions=args),
+            "QUANTILE_T_DIGEST": lambda args: exp.Anonymous(this="QUANTILE_T_DIGEST", expressions=args),
+            "PERCENTILE": lambda args: exp.Anonymous(this="PERCENTILE", expressions=args),
+            "APPROX_COUNT_DISTINCT": lambda args: exp.Anonymous(this="APPROX_COUNT_DISTINCT", expressions=args),
+            "APPROX_MEDIAN": lambda args: exp.Anonymous(this="APPROX_MEDIAN", expressions=args),
+            "PRODUCT": lambda args: exp.Anonymous(this="PRODUCT", expressions=args),
+            "LATEST_VALUE": lambda args: exp.Anonymous(this="LATEST_VALUE", expressions=args),
+            "EARLIEST_VALUE": lambda args: exp.Anonymous(this="EARLIEST_VALUE", expressions=args),
+            
             # 表函数支持
             "GENERATE_SERIES": _build_generate_series,  # 复用PostgreSQL实现
             "PARSE_JSON": lambda args: exp.Anonymous(this="PARSE_JSON", expressions=args),
@@ -1135,7 +1151,7 @@ class Yanhuang(Postgres):
             exp.DistStyleProperty: lambda self, e: self.naked_property(e),
             exp.Explode: lambda self, e: self.func("EXPLODE", e.this),
             exp.GeneratedAsIdentityColumnConstraint: generatedasidentitycolumnconstraint_sql,
-            exp.GroupConcat: lambda self, e: self.func("LISTAGG", e.this, e.args.get("separator")),
+            exp.GroupConcat: lambda self, e: self.func("STRING_AGG", e.this, e.args.get("separator")),
             exp.JSONExtract: lambda self, e: json_extract_segments("JSON_EXTRACT_PATH_TEXT")(self, e),
             exp.JSONExtractScalar: lambda self, e: json_extract_segments("JSON_EXTRACT_PATH_TEXT")(self, e),
             exp.JSONPathKey: lambda self, e: self.sql(e, "this"),
@@ -1172,6 +1188,9 @@ class Yanhuang(Postgres):
             
             # 字符串函数转换
             exp.Substring: lambda self, e: self.func("SUBSTRING", e.this, e.args.get("start"), e.args.get("length")) if e.args.get("length") else self.func("SUBSTRING", e.this, e.args.get("start")),
+            
+            # 聚合函数转换 - 保持炎凰SQL原生函数名
+            exp.GroupConcat: lambda self, e: self.func("STRING_AGG", e.this, e.args.get("separator")),
             
             # 字符串转义支持
             exp.ByteString: lambda self, e: self.bytestring_sql(e),
