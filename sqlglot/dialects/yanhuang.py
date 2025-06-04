@@ -14,7 +14,7 @@ from sqlglot.dialects.dialect import (
     rename_func,
     map_date_part,
 )
-from sqlglot.dialects.postgres import Postgres
+from sqlglot.dialects.postgres import Postgres, _build_generate_series
 from sqlglot.helper import seq_get
 from sqlglot.tokens import TokenType
 from sqlglot.parser import build_convert_timezone
@@ -80,7 +80,74 @@ class Yanhuang(Postgres):
             "CAST": exp.Cast.from_arg_list,
             "CONCAT": exp.Concat.from_arg_list,
             "CONTAINS": lambda args: exp.Anonymous(this="CONTAINS", expressions=args),
+            
+            # 字符串函数补充
+            "SUBSTRING": lambda args: exp.Substring.from_arg_list(args),
+            "POSITION": lambda args: exp.StrPosition.from_arg_list(args),
+            "CHAR_LENGTH": lambda args: exp.Length.from_arg_list(args),
+            "CHARACTER_LENGTH": lambda args: exp.Length.from_arg_list(args),
+            "LEFT": lambda args: exp.Left.from_arg_list(args),
+            "RIGHT": lambda args: exp.Right.from_arg_list(args),
+            "REVERSE": lambda args: exp.Anonymous(this="REVERSE", expressions=args),
+            "REPEAT": lambda args: exp.Repeat.from_arg_list(args),
+            "LPAD": lambda args: exp.Anonymous(this="LPAD", expressions=args),
+            "RPAD": lambda args: exp.Anonymous(this="RPAD", expressions=args),
+            
+            # 数学函数补充
+            "ABS": lambda args: exp.Abs.from_arg_list(args),
+            "CEIL": lambda args: exp.Ceil.from_arg_list(args),
+            "CEILING": lambda args: exp.Ceil.from_arg_list(args),
+            "FLOOR": lambda args: exp.Floor.from_arg_list(args),
+            "ROUND": lambda args: exp.Round.from_arg_list(args),
+            "SQRT": lambda args: exp.Sqrt.from_arg_list(args),
+            "POWER": lambda args: exp.Pow.from_arg_list(args),
+            "POW": lambda args: exp.Pow.from_arg_list(args),
+            "MOD": lambda args: exp.Mod.from_arg_list(args),
+            "SIN": lambda args: exp.Anonymous(this="SIN", expressions=args),
+            "COS": lambda args: exp.Anonymous(this="COS", expressions=args),
+            "TAN": lambda args: exp.Anonymous(this="TAN", expressions=args),
+            "ASIN": lambda args: exp.Anonymous(this="ASIN", expressions=args),
+            "ACOS": lambda args: exp.Anonymous(this="ACOS", expressions=args),
+            "ATAN": lambda args: exp.Anonymous(this="ATAN", expressions=args),
+            "LOG": lambda args: exp.Log.from_arg_list(args),
+            "LOG10": lambda args: exp.Anonymous(this="LOG10", expressions=args),
+            "EXP": lambda args: exp.Exp.from_arg_list(args),
+            "SIGN": lambda args: exp.Anonymous(this="SIGN", expressions=args),
+            "TRUNC": lambda args: exp.Anonymous(this="TRUNC", expressions=args),
+            
+            # 条件函数 - 重写DECODE以避免转换为CASE
+            "IF": lambda args: exp.If.from_arg_list(args),
+            "DECODE": lambda args: exp.Anonymous(this="DECODE", expressions=args),
+            
+            # 炎凰SQL特有函数
+            "TIME_BUCKET": lambda args: exp.Anonymous(this="TIME_BUCKET", expressions=args),
+            "REGEX_EXTRACT": lambda args: exp.Anonymous(this="REGEX_EXTRACT", expressions=args),
+            "REGEX_MATCH": lambda args: exp.Anonymous(this="REGEX_MATCH", expressions=args),
+            "IP_TO_COUNTRY": lambda args: exp.Anonymous(this="IP_TO_COUNTRY", expressions=args),
+            "IP_TO_REGION": lambda args: exp.Anonymous(this="IP_TO_REGION", expressions=args),
+            "IP_TO_CITY": lambda args: exp.Anonymous(this="IP_TO_CITY", expressions=args),
+            "GEOHASH": lambda args: exp.Anonymous(this="GEOHASH", expressions=args),
+            
+            # 表函数支持
+            "GENERATE_SERIES": _build_generate_series,  # 复用PostgreSQL实现
+            "PARSE_JSON": lambda args: exp.Anonymous(this="PARSE_JSON", expressions=args),
+            "PARSE_CSV": lambda args: exp.Anonymous(this="PARSE_CSV", expressions=args),
+            "PARSE_REGEX": lambda args: exp.Anonymous(this="PARSE_REGEX", expressions=args),
+            "PARSE_KV": lambda args: exp.Anonymous(this="PARSE_KV", expressions=args),
+            "PARSE_XML": lambda args: exp.Anonymous(this="PARSE_XML", expressions=args),
+            "IP_LOCATION": lambda args: exp.Anonymous(this="IP_LOCATION", expressions=args),
+            "GEO_DISTANCE": lambda args: exp.Anonymous(this="GEO_DISTANCE", expressions=args),
+            "LOAD_CSV": lambda args: exp.Anonymous(this="LOAD_CSV", expressions=args),
+            "LOAD_JSON": lambda args: exp.Anonymous(this="LOAD_JSON", expressions=args),
+            "LOAD_PARQUET": lambda args: exp.Anonymous(this="LOAD_PARQUET", expressions=args),
         }
+
+        # 重写FUNCTION_PARSERS来移除DECODE的特殊解析
+        # 这样DECODE会使用FUNCTIONS字典中的匿名函数定义而不是_parse_decode方法
+        FUNCTION_PARSERS = {
+            **Postgres.Parser.FUNCTION_PARSERS,
+        }
+        FUNCTION_PARSERS.pop("DECODE", None)  # 移除DECODE的特殊解析方法
 
         NO_PAREN_FUNCTION_PARSERS = {
             **Postgres.Parser.NO_PAREN_FUNCTION_PARSERS,
@@ -189,7 +256,6 @@ class Yanhuang(Postgres):
             self, strict: bool, safe: t.Optional[bool] = None
         ) -> t.Optional[exp.Expression]:
             to = self._parse_types()
-            self._match(TokenType.COMMA)
             this = self._parse_bitwise()
             return self.expression(exp.TryCast, this=this, to=to, safe=safe)
 
@@ -1068,32 +1134,52 @@ class Yanhuang(Postgres):
             exp.Delete: lambda self, e: self.delete_sql(e),
             exp.DistKeyProperty: lambda self, e: self.func("DISTKEY", e.this),
             exp.DistStyleProperty: lambda self, e: self.naked_property(e),
-            exp.Explode: lambda self, e: self.explode_sql(e),
-            exp.FromBase: rename_func("STRTOL"),
+            exp.Explode: lambda self, e: self.func("EXPLODE", e.this),
             exp.GeneratedAsIdentityColumnConstraint: generatedasidentitycolumnconstraint_sql,
-            exp.JSONExtract: json_extract_segments("JSON_EXTRACT_PATH_TEXT"),
-            exp.JSONExtractScalar: json_extract_segments("JSON_EXTRACT_PATH_TEXT"),
-            exp.GroupConcat: rename_func("LISTAGG"),
-            exp.Hex: lambda self, e: self.func("UPPER", self.func("TO_HEX", self.sql(e, "this"))),
-            exp.Select: transforms.preprocess(
-                [
-                    transforms.eliminate_distinct_on,
-                    transforms.eliminate_semi_and_anti_joins,
-                    transforms.unqualify_unnest,
-                    transforms.unnest_generate_date_array_using_recursive_cte,
-                ]
-            ),
-            exp.SortKeyProperty: lambda self, e: f"{'COMPOUND ' if e.args['compound'] else ''}SORTKEY({self.format_args(*e.this)})",
-            exp.StartsWith: lambda self, e: f"{self.sql(e.this)} LIKE {self.sql(e.expression)} || '%'",
-            exp.StringToArray: rename_func("SPLIT_TO_ARRAY"),
+            exp.GroupConcat: lambda self, e: self.func("LISTAGG", e.this, e.args.get("separator")),
+            exp.JSONExtract: lambda self, e: json_extract_segments("JSON_EXTRACT_PATH_TEXT")(self, e),
+            exp.JSONExtractScalar: lambda self, e: json_extract_segments("JSON_EXTRACT_PATH_TEXT")(self, e),
+            exp.JSONPathKey: lambda self, e: self.sql(e, "this"),
+            exp.JSONPathRoot: lambda self, e: "",
+            exp.JSONPathSubscript: lambda self, e: self.sql(e, "this"),
+            exp.Lateral: lambda self, e: self.sql(e, "this"),
+            exp.Limit: lambda self, e: self.limit_sql(e, top=False),  # 炎凰SQL使用LIMIT而不是TOP
+            exp.Map: lambda self, e: f"OBJECT({self.expressions(e, flat=True)})",
+            exp.Merge: lambda self, e: self.merge_sql(e),
+            exp.Offset: lambda self, e: self.offset_sql(e),
+            exp.OnConflict: lambda self, e: "",
+            exp.Pivot: lambda self, e: self.pivot_sql(e),
+            exp.Qualify: lambda self, e: self.qualify_sql(e),
+            exp.RegexpLike: lambda self, e: self.binary(e, "~"),
+            exp.RegexpILike: lambda self, e: self.binary(e, "~*"),
+            exp.Returning: lambda self, e: "",
+            exp.Select: lambda self, e: self.select_sql(e),
+            exp.SortKeyProperty: lambda self, e: f"SORTKEY({self.expressions(e, flat=True)})",
             exp.TableSample: lambda self, e: self.tablesample_sql(e),
-            exp.TsOrDsAdd: date_delta_sql("DATEADD"),
-            exp.TsOrDsDiff: date_delta_sql("DATEDIFF"),
-            exp.UnixToTime: lambda self, e: f"(TIMESTAMP 'epoch' + {self.sql(e.this)} * INTERVAL '1 SECOND')",
-            exp.Union: lambda self, e: self.union_sql(e),
+            exp.ToChar: lambda self, e: self.function_fallback_sql(e),
+            exp.TryCast: lambda self, e: self.cast_sql(e),
+            exp.TsOrDsAdd: lambda self, e: self.dateadd_sql(e),
+            exp.TsOrDsDiff: lambda self, e: self.datediff_sql(e),
+            exp.UnixToTime: lambda self, e: f"DATEADD(second, {self.sql(e, 'this')}, '1970-01-01')",
+            exp.Values: lambda self, e: self.values_sql(e),
+            exp.Variance: rename_func("VAR_SAMP"),
+            exp.VariancePop: rename_func("VAR_POP"),
+            exp.With: lambda self, e: self.with_sql(e),
+            exp.WithinGroup: lambda self, e: self.withingroup_sql(e),
+            
+            # 表函数转换
+            exp.ExplodingGenerateSeries: lambda self, e: self.func("GENERATE_SERIES", e.args.get("start"), e.args.get("end"), e.args.get("step")) if e.args.get("step") else self.func("GENERATE_SERIES", e.args.get("start"), e.args.get("end")),
+            exp.Unnest: lambda self, e: self.func("UNNEST", e.this),
+            
+            # 字符串函数转换
+            exp.Substring: lambda self, e: self.func("SUBSTRING", e.this, e.args.get("start"), e.args.get("length")) if e.args.get("length") else self.func("SUBSTRING", e.this, e.args.get("start")),
+            
             # 字符串转义支持
             exp.ByteString: lambda self, e: self.bytestring_sql(e),
             exp.UnicodeString: lambda self, e: self.unicodestring_sql(e),
+            
+            # 条件函数转换
+            exp.If: lambda self, e: self.func("IF", e.this, e.args.get("true"), e.args.get("false")),
         }
 
         # Postgres maps exp.Pivot to no_pivot_sql, but Redshift support pivots
@@ -1363,6 +1449,9 @@ class Yanhuang(Postgres):
             return "APPLY"
 
         def from_sql(self, expression):
+            # 检查是否是多表合并Union
+            if isinstance(expression.this, exp.Union) and expression.this.args.get("is_table_merge"):
+                return self.union_sql(expression.this)
             # 只返回主表部分，不拼接join
             return self.sql(expression, "this")
 
@@ -1493,7 +1582,11 @@ class Yanhuang(Postgres):
             return sql
 
         def table_sql(self, expression: exp.Table, sep: str = " AS ") -> str:
-            """Override to fix APPLY join spacing"""
+            """Override to fix APPLY join spacing and handle table merges"""
+            # 检查是否是多表合并Union
+            if isinstance(expression.this, exp.Union) and expression.this.args.get("is_table_merge"):
+                return self.union_sql(expression.this)
+            
             table = self.table_parts(expression)
             only = "ONLY " if expression.args.get("only") else ""
             partition = self.sql(expression, "partition")
@@ -1636,18 +1729,23 @@ class Yanhuang(Postgres):
             if expression.args.get("is_table_merge"):
                 # 提取表名
                 left_table = None
-                right_table = None
+                right_part = None
                 
                 if isinstance(expression.this, exp.Select) and expression.this.args.get("from"):
                     left_table = expression.this.args["from"].this
                 if isinstance(expression.expression, exp.Select) and expression.expression.args.get("from"):
-                    right_table = expression.expression.args["from"].this
+                    right_expr = expression.expression.args["from"].this
+                    # 如果右边也是Union（多表合并），递归处理
+                    if isinstance(right_expr, exp.Union) and right_expr.args.get("is_table_merge"):
+                        right_part = self.union_sql(right_expr)
+                    else:
+                        right_part = self.sql(right_expr)
                 
-                if left_table and right_table:
-                    return f"{self.sql(left_table)} | {self.sql(right_table)}"
+                if left_table and right_part:
+                    return f"{self.sql(left_table)} | {right_part}"
             
-            # 普通UNION处理 - 使用set_operations方法
-            return self.set_operations(expression)
+            # 普通UNION处理
+            return super().union_sql(expression)
 
         def setop_sql(self, expression: exp.Union, op: str) -> str:
             """处理集合操作"""

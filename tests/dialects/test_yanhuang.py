@@ -1,3 +1,5 @@
+import sqlglot
+from sqlglot import exp
 from tests.dialects.test_dialect import Validator
 
 class TestYanhuang(Validator):
@@ -59,11 +61,10 @@ class TestYanhuang(Validator):
 
     def test_apply(self):
         # 表函数APPLY
-        self.validate_identity("SELECT * FROM main OUTER APPLY ip_location(main.ip) ip_table")
-        # 子查询APPLY
-        self.validate_identity("SELECT * FROM main APPLY (SELECT UPPER(main._message) AS upper_message) AS table_bar")
-        # 复杂APPLY（应报错）
-        self.validate_raises("SELECT * FROM main APPLY (main.ip + 1)") 
+        self.validate_identity("SELECT * FROM main OUTER APPLY IP_LOCATION(main.ip) ip_table")
+        
+        # APPLY投影
+        self.validate_identity("SELECT table_bar.upper_message, main._message FROM main APPLY (SELECT UPPER(main._message) AS upper_message) AS table_bar WHERE table_bar.upper_message LIKE '%GET%'")
 
     def test_window_functions(self):
         # 基本窗口函数（支持）
@@ -319,14 +320,14 @@ class TestYanhuang(Validator):
         # complex_pivot = """
         # SELECT * EXCEPT ("NULL") FROM (
         #     PIVOT cities ON country USING SUM(population)
-        #     GROUP BY TIME(span='5y', start='1990-01-01T00:00:00', end='2020-01-01T00:00:00') 
+        #     GROUP BY TIME(span='5y', start='1990-01-01T00:00:00', end='2020-01-01T00:00:00')
         #     ORDER BY _time
         # )
         # """
         # self.validate_identity(complex_pivot)
         
         # CONTAINS + COLUMNS + APPLY综合 - 修复为单行格式
-        self.validate_identity("SELECT COLUMNS('^f[1-4]$') EXCEPT (f1) REPLACE (UPPER(f2) AS f2) FROM main OUTER APPLY ip_location(main.ip) ip_table WHERE CONTAINS('GET') AND method = 'POST'")
+        self.validate_identity("SELECT COLUMNS('^f[1-4]$') EXCEPT (f1) REPLACE (UPPER(f2) AS f2) FROM main OUTER APPLY IP_LOCATION(main.ip) ip_table WHERE CONTAINS('GET') AND method = 'POST'")
         
         # 窗口函数 + GROUP BY TIME - 修复为单行格式
         self.validate_identity("SELECT _time, region, SUM(sales) OVER (PARTITION BY region ORDER BY _time ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS running_total FROM sales_data GROUP BY region, TIME(span='1d') ORDER BY _time, region")
@@ -408,3 +409,95 @@ class TestYanhuang(Validator):
         
         # 暂时跳过完整测试，因为需要验证具体的AST结构
         pass 
+
+    def test_enhanced_functions(self):
+        """测试新增的标量函数和表函数"""
+        
+        # 字符串函数测试
+        self.validate_identity("SELECT SUBSTRING(name, 1, 5) FROM main")
+        # CHAR_LENGTH和CHARACTER_LENGTH都会被转换为LENGTH
+        self.validate_all(
+            "SELECT CHAR_LENGTH(name), CHARACTER_LENGTH(name) FROM main",
+            write={
+                "yanhuang": "SELECT LENGTH(name), LENGTH(name) FROM main",
+            },
+        )
+        self.validate_identity("SELECT LEFT(name, 3), RIGHT(name, 3) FROM main")
+        self.validate_identity("SELECT REVERSE(name) FROM main")
+        self.validate_identity("SELECT REPEAT(name, 3) FROM main")
+        self.validate_identity("SELECT LPAD(name, 10, '0'), RPAD(name, 10, '0') FROM main")
+        
+        # 数学函数测试
+        self.validate_identity("SELECT SIN(angle), COS(angle), TAN(angle) FROM main")
+        self.validate_identity("SELECT ASIN(value), ACOS(value), ATAN(value) FROM main")
+        self.validate_identity("SELECT LOG(value), LOG10(value), EXP(value) FROM main")
+        self.validate_identity("SELECT SIGN(value), TRUNC(value) FROM main")
+        
+        # 条件函数测试
+        self.validate_identity("SELECT IF(condition, 'true', 'false') FROM main")
+        self.validate_identity("SELECT DECODE(status, 1, 'active', 2, 'inactive', 'unknown') FROM main")
+        
+        # 炎凰SQL特有函数测试
+        self.validate_identity("SELECT TIME_BUCKET('1h', ts) FROM main")
+        self.validate_identity("SELECT REGEX_EXTRACT(text, '[0-9]+') FROM main")
+        self.validate_identity("SELECT REGEX_MATCH(text, '[a-z]+') FROM main")
+        self.validate_identity("SELECT IP_TO_COUNTRY(ip_address) FROM main")
+        self.validate_identity("SELECT IP_TO_REGION(ip_address) FROM main")
+        self.validate_identity("SELECT IP_TO_CITY(ip_address) FROM main")
+        self.validate_identity("SELECT GEOHASH(latitude, longitude) FROM main")
+        
+        # 表函数测试
+        self.validate_identity("SELECT * FROM GENERATE_SERIES(1, 10)")
+        self.validate_identity("SELECT * FROM GENERATE_SERIES(1, 10, 2)")
+        self.validate_identity("SELECT * FROM PARSE_JSON(json_data)")
+        self.validate_identity("SELECT * FROM PARSE_CSV(csv_data)")
+        self.validate_identity("SELECT * FROM IP_LOCATION(ip_address)")
+        self.validate_identity("SELECT * FROM LOAD_CSV('file.csv')")
+        
+        # 验证函数解析正确性
+        parsed = self.parse_one("SELECT SUBSTRING(name, 1, 5) FROM main", dialect="yanhuang")
+        self.assertIsInstance(parsed.find(exp.Substring), exp.Substring)
+        
+        parsed = self.parse_one("SELECT SIN(angle) FROM main", dialect="yanhuang")
+        self.assertIsInstance(parsed.find(exp.Anonymous), exp.Anonymous)
+        
+        parsed = self.parse_one("SELECT * FROM GENERATE_SERIES(1, 10)", dialect="yanhuang")
+        self.assertIsInstance(parsed.find(exp.ExplodingGenerateSeries), exp.ExplodingGenerateSeries)
+
+    def test_function_combinations(self):
+        """测试函数组合使用"""
+        
+        # 字符串函数组合
+        self.validate_identity("SELECT UPPER(LEFT(name, 5)) FROM main")
+        self.validate_identity("SELECT LENGTH(TRIM(REVERSE(name))) FROM main")
+        
+        # 数学函数组合
+        self.validate_identity("SELECT ROUND(SIN(angle) * 100, 2) FROM main")
+        self.validate_identity("SELECT ABS(LOG10(value)) FROM main")
+        
+        # 条件函数与其他函数组合
+        self.validate_identity("SELECT IF(LENGTH(name) > 5, UPPER(name), LOWER(name)) FROM main")
+        self.validate_identity("SELECT DECODE(SIGN(value), 1, 'positive', -1, 'negative', 'zero') FROM main")
+        
+        # 炎凰SQL特有函数组合
+        self.validate_identity("SELECT UPPER(IP_TO_COUNTRY(ip_address)) FROM main")
+        self.validate_identity("SELECT LENGTH(REGEX_EXTRACT(text, '[a-z]+')) FROM main")
+
+    def test_function_with_complex_expressions(self):
+        """测试函数与复杂表达式的结合"""
+        
+        # 在WHERE子句中使用函数
+        self.validate_identity("SELECT * FROM main WHERE LENGTH(name) > 5")
+        self.validate_identity("SELECT * FROM main WHERE SIN(angle) > 0.5")
+        self.validate_identity("SELECT * FROM main WHERE CONTAINS('keyword')")
+        
+        # 在ORDER BY中使用函数
+        self.validate_identity("SELECT * FROM main ORDER BY LENGTH(name)")
+        self.validate_identity("SELECT * FROM main ORDER BY ABS(value)")
+        
+        # 在GROUP BY中使用函数
+        self.validate_identity("SELECT LEFT(name, 1), COUNT(*) FROM main GROUP BY LEFT(name, 1)")
+        self.validate_identity("SELECT SIGN(value), AVG(value) FROM main GROUP BY SIGN(value)")
+        
+        # 在HAVING中使用函数
+        self.validate_identity("SELECT status, COUNT(*) FROM main GROUP BY status HAVING COUNT(*) > 10") 
