@@ -363,14 +363,42 @@ class TestYanhuang(Validator):
         """测试字符串前缀功能"""
         
         # 测试E前缀字符串（C-style转义）
-        # 注意：完整的转义处理需要在tokenizer中实现
-        # 这里主要测试语法解析
+        self.validate_identity("SELECT E'abc\\ndef' AS field_name FROM main")
+        self.validate_identity("SELECT E'hello\\tworld' AS greeting FROM main")
+        self.validate_identity("SELECT E'line1\\nline2\\rline3' AS multiline FROM main")
         
         # 测试U&前缀字符串（Unicode编码）
-        # 同样，完整功能需要tokenizer支持
+        self.validate_identity("SELECT U&'\\0061bcd' AS field_name FROM main")
+        self.validate_identity("SELECT U&'Hello winter \\2603 !' AS unicode_text FROM main")
         
-        # 暂时跳过，因为需要更深入的tokenizer修改
-        pass
+        # 测试带UESCAPE的Unicode字符串
+        self.validate_identity("SELECT U&'!0061bcd!!' UESCAPE '!' AS field_name FROM main")
+        self.validate_identity("SELECT U&'Hello #2603 world' UESCAPE '#' AS custom_escape FROM main")
+        
+        # 测试普通字符串（应该保持不变）
+        self.validate_identity("SELECT 'normal string' AS normal FROM main")
+        # 注意：SQLGlot会将双单引号转义转换为反斜杠转义
+        self.validate_all(
+            "SELECT 'tom''s cat' AS escaped_quote FROM main",
+            write={
+                "yanhuang": "SELECT 'tom\\'s cat' AS escaped_quote FROM main",
+            },
+        )
+        
+        # 测试字符串转义的转换
+        self.validate_all(
+            "SELECT E'abc\\ndef' AS field_name FROM main",
+            write={
+                "yanhuang": "SELECT E'abc\\ndef' AS field_name FROM main",
+            },
+        )
+        
+        self.validate_all(
+            "SELECT U&'\\0061bcd' AS field_name FROM main",
+            write={
+                "yanhuang": "SELECT U&'\\0061bcd' AS field_name FROM main",
+            },
+        )
 
     def test_multi_table_union_syntax(self):
         """测试多表合并语法 table1 | table2"""
