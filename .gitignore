@@ -147,3 +147,9 @@ sqlglot/_version.py
 
 # Cursor
 .cursor/
+
+# Debug
+debug_*
+
+# tmp
+tmp/

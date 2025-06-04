@@ -38,6 +38,55 @@ def _build_date_delta(expr_type: t.Type[E]) -> t.Callable[[t.List], E]:
     return _builder
 
 
+def _create_current_timestamp_with_func(original_func):
+    """创建带有原始函数名信息的CurrentTimestamp表达式"""
+    expr = exp.CurrentTimestamp()
+    expr.meta["original_func"] = original_func
+    return expr
+
+
+def _extract_to_date_part(args: t.List) -> exp.Anonymous:
+    """将EXTRACT函数降级映射为DATE_PART函数
+    
+    EXTRACT(YEAR FROM date_col) -> DATE_PART('year', date_col)
+    """
+    if len(args) != 2:
+        # 如果参数不正确，返回原始调用
+        return exp.Anonymous(this="EXTRACT", expressions=args)
+    
+    # args[0] 是时间部分（如YEAR），args[1] 是源表达式（如date_col）
+    time_part, source_expr = args
+    
+    # 转换时间部分为字符串字面量
+    if isinstance(time_part, exp.Var):
+        part_str = exp.Literal.string(time_part.this.lower())
+    elif isinstance(time_part, (exp.Identifier, exp.Column)):
+        part_str = exp.Literal.string(str(time_part).lower())
+    else:
+        part_str = time_part
+        
+    return exp.Anonymous(this="DATE_PART", expressions=[part_str, source_expr])
+
+
+def _add_months_to_dateadd(args: t.List) -> exp.TsOrDsAdd:
+    """将ADD_MONTHS函数降级映射为DATEADD函数
+    
+    ADD_MONTHS(date_col, 3) -> DATEADD('month', 3, date_col)
+    """
+    if len(args) != 2:
+        # 如果参数不正确，返回原始调用
+        return exp.Anonymous(this="ADD_MONTHS", expressions=args)
+    
+    date_expr, months_expr = args
+    
+    # 创建DATEADD表达式：DATEADD('month', months, date)
+    return exp.TsOrDsAdd(
+        this=date_expr,
+        expression=months_expr,
+        unit=exp.Literal.string("month")
+    )
+
+
 class Yanhuang(Postgres):
     """
     炎凰SQL方言，继承自Postgres。
@@ -56,22 +105,21 @@ class Yanhuang(Postgres):
     # ref: https://docs.aws.amazon.com/redshift/latest/dg/r_FORMAT_strings.html
     TIME_FORMAT = "'YYYY-MM-DD HH24:MI:SS'"
     TIME_MAPPING = {**Postgres.TIME_MAPPING, "MON": "%b", "HH24": "%H", "HH": "%I"}
+    
+    # BYTE_START和BYTE_END由metaclass根据tokenizer的BYTE_STRINGS自动设置
 
     class Parser(Postgres.Parser):
         FUNCTIONS = {
             **Postgres.Parser.FUNCTIONS,
-            "ADD_MONTHS": lambda args: exp.TsOrDsAdd(
-                this=seq_get(args, 0),
-                expression=seq_get(args, 1),
-                unit=exp.var("month"),
-                return_type=exp.DataType.build("TIMESTAMP"),
-            ),
+            # 添加降级映射：不支持的函数映射到支持的等价函数
+            "EXTRACT": _extract_to_date_part,  # EXTRACT降级映射为DATE_PART
+            "ADD_MONTHS": _add_months_to_dateadd,  # ADD_MONTHS降级映射为DATEADD
             "CONVERT_TIMEZONE": lambda args: build_convert_timezone(args, "UTC"),
             "DATEADD": _build_date_delta(exp.TsOrDsAdd),
             "DATE_ADD": _build_date_delta(exp.TsOrDsAdd),
             "DATEDIFF": _build_date_delta(exp.TsOrDsDiff),
             "DATE_DIFF": _build_date_delta(exp.TsOrDsDiff),
-            "GETDATE": exp.CurrentTimestamp.from_arg_list,
+            "GETDATE": lambda args: _create_current_timestamp_with_func('GETDATE'),
             "LISTAGG": exp.GroupConcat.from_arg_list,
             "SPLIT_TO_ARRAY": lambda args: exp.StringToArray(
                 this=seq_get(args, 0), expression=seq_get(args, 1) or exp.Literal.string(",")
@@ -79,10 +127,11 @@ class Yanhuang(Postgres):
             "STRTOL": exp.FromBase.from_arg_list,
             "CAST": exp.Cast.from_arg_list,
             "CONTAINS": lambda args: exp.Anonymous(this="CONTAINS", expressions=args),
+            # COLUMNS函数的特殊处理在FUNCTION_PARSERS中定义
             
             # 字符串函数补充
             "SUBSTRING": lambda args: exp.Substring.from_arg_list(args),
-            "SUBSTR": lambda args: exp.Substring.from_arg_list(args),  # 炎凰SQL支持SUBSTR别名
+            "SUBSTR": lambda args: exp.Anonymous(this="SUBSTR", expressions=args),  # 炎凰SQL支持SUBSTR别名，保持函数名一致性
             "POSITION": lambda args: exp.StrPosition.from_arg_list(args),
             "CHAR_LENGTH": lambda args: exp.Length.from_arg_list(args),
             "CHARACTER_LENGTH": lambda args: exp.Length.from_arg_list(args),
@@ -131,19 +180,23 @@ class Yanhuang(Postgres):
             "DEGREES": lambda args: exp.Anonymous(this="DEGREES", expressions=args),
             "RADIANS": lambda args: exp.Anonymous(this="RADIANS", expressions=args),
             
-            # 日期时间函数补充
-            "NOW": exp.CurrentTimestamp.from_arg_list,
-            "CURRENT_TIMESTAMP": exp.CurrentTimestamp.from_arg_list,
+            # 日期时间函数补充 - 仅保留炎凰数据明确支持的函数
+            "NOW": lambda args: _create_current_timestamp_with_func('NOW'),
+            "CURRENT_TIMESTAMP": lambda args: _create_current_timestamp_with_func('CURRENT_TIMESTAMP'),
             "CURRENT_DATE": exp.CurrentDate.from_arg_list,
             "CURRENT_TIME": exp.CurrentTime.from_arg_list,
-            "EXTRACT": exp.Extract.from_arg_list,
-            "DATE_PART": exp.Extract.from_arg_list,
+            # 移除EXTRACT - 炎凰数据不支持此函数，只支持DATE_PART
+            # "EXTRACT": exp.Extract.from_arg_list,
+            "DATE_PART": lambda args: exp.Anonymous(this="DATE_PART", expressions=args),  # 保持原始函数名
             "DATE_TRUNC": lambda args: exp.Anonymous(this="DATE_TRUNC", expressions=args),
             "AGE": lambda args: exp.Anonymous(this="AGE", expressions=args),
             "TO_TIMESTAMP": lambda args: exp.Anonymous(this="TO_TIMESTAMP", expressions=args),
             "TO_DATE": lambda args: exp.Anonymous(this="TO_DATE", expressions=args),
             "TO_CHAR": lambda args: exp.Anonymous(this="TO_CHAR", expressions=args),
             "EPOCH": lambda args: exp.Anonymous(this="EPOCH", expressions=args),
+            
+            # 炎凰SQL特有的TIME函数（用于时间聚合，支持多参数）
+            "TIME": lambda args: exp.Anonymous(this="TIME", expressions=args),
             
             # 条件函数 - 重写DECODE以避免转换为CASE
             "IF": lambda args: exp.If.from_arg_list(args),
@@ -255,13 +308,22 @@ class Yanhuang(Postgres):
             "SCHEMA": lambda args: exp.Anonymous(this="SCHEMA", expressions=args),
             "CONNECTION_ID": lambda args: exp.Anonymous(this="CONNECTION_ID", expressions=args),
         }
-
+        
         # 重写FUNCTION_PARSERS来移除DECODE的特殊解析
-        # 这样DECODE会使用FUNCTIONS字典中的匿名函数定义而不是_parse_decode方法
         FUNCTION_PARSERS = {
             **Postgres.Parser.FUNCTION_PARSERS,
+            "COLUMNS": lambda self: self._parse_columns_with_ops(),
+            "EXTRACT": lambda self: self._parse_extract(),  # 添加EXTRACT降级映射
         }
         FUNCTION_PARSERS.pop("DECODE", None)  # 移除DECODE的特殊解析方法
+        FUNCTION_PARSERS.pop("DATE_PART", None)  # 移除DATE_PART的特殊解析方法，使用FUNCTIONS中的Anonymous定义
+
+        # 完全重写STRING_PARSERS以修复UNICODE_STRING的处理
+        # 避免基类的inline UESCAPE处理逻辑
+        STRING_PARSERS = {
+            **Postgres.Parser.STRING_PARSERS,
+            tokens.TokenType.UNICODE_STRING: lambda self, token: self._parse_unicode_string(token),
+        }
 
         NO_PAREN_FUNCTION_PARSERS = {
             **Postgres.Parser.NO_PAREN_FUNCTION_PARSERS,
@@ -276,1126 +338,293 @@ class Yanhuang(Postgres):
             TokenType.DESCRIBE: lambda self: self._parse_describe(),
             TokenType.VALUES: lambda self: self._parse_values(),
             TokenType.SHOW: lambda self: self._parse_show(),
-            TokenType.PIVOT: lambda self: self._parse_pivot_statement(),
         }
 
         SUPPORTS_IMPLICIT_UNNEST = True
 
-        def _parse_table(
-            self,
-            schema: bool = False,
-            joins: bool = False,
-            alias_tokens: t.Optional[t.Collection[TokenType]] = None,
-            parse_bracket: bool = False,
-            is_db_reference: bool = False,
-            parse_partition: bool = False,
-        ) -> t.Optional[exp.Expression]:
-            main_table = super()._parse_table(
-                schema=schema,
-                joins=False,
-                alias_tokens=alias_tokens,
-                parse_bracket=parse_bracket,
-                is_db_reference=is_db_reference,
-                parse_partition=parse_partition,
-            )
+        def _parse_unicode_string(self, token):
+            """解析Unicode字符串，支持 U&'str' 格式"""
+            value = token.text
             
-            # 检查多表合并语法 table1 | table2
-            if self._match(TokenType.PIPE):
-                # 创建一个特殊的表达式来表示多表合并
-                right_table = self._parse_table(
-                    schema=schema,
-                    joins=False,
-                    alias_tokens=alias_tokens,
-                    parse_bracket=parse_bracket,
-                    is_db_reference=is_db_reference,
-                    parse_partition=parse_partition,
-                )
-                if right_table:
-                    # 使用Union来表示多表合并，但标记为特殊类型
-                    union_expr = self.expression(
-                        exp.Union,
-                        this=exp.select("*").from_(main_table),
-                        expression=exp.select("*").from_(right_table),
-                        distinct=False
-                    )
-                    # 标记这是多表合并而不是普通UNION
-                    union_expr.set("is_table_merge", True)
-                    return union_expr
+            # 去掉前缀和引号
+            if value.lower().startswith('u&'):
+                content = value[3:-1]  # 去掉U&'和'
+            else:
+                content = value[2:-1]  # 去掉u&'和'
             
-            joins_list = []
-            while True:
-                if self._match_texts(["APPLY", "OUTER APPLY", "CROSS APPLY"]):
-                    op = self._prev.text.upper()
-                    cross_apply = None
-                    if op == "OUTER APPLY":
-                        cross_apply = False
-                    elif op == "CROSS APPLY":
-                        cross_apply = True
-                    
-                    if self._match(TokenType.L_PAREN):
-                        # 解析子查询
-                        select_expr = self._parse_select(nested=True, parse_subquery_alias=False)
-                        self._match(TokenType.R_PAREN)
-                        
-                        # 解析AS alias
-                        alias = None
-                        if self._match_texts(["AS"]):
-                            pass  # AS关键字已经消费掉了
-                        if self._curr and self._curr.token_type in (TokenType.VAR, TokenType.IDENTIFIER):
-                            alias = self._parse_table_alias(alias_tokens=alias_tokens or self.TABLE_ALIAS_TOKENS)
-                        
-                        if not alias:
-                            self.raise_error("APPLY子查询必须指定别名，如APPLY (SELECT ...) AS alias")
-                        
-                        right = self.expression(exp.Subquery, this=select_expr, alias=alias)
-                    else:
-                        right = self._parse_table()
-                        alias = self._parse_table_alias(alias_tokens=alias_tokens or self.TABLE_ALIAS_TOKENS)
-                    
-                    lateral = self.expression(
-                        exp.Lateral,
-                        this=right,
-                        cross_apply=cross_apply,
-                    )
-                    join = self.expression(exp.Join, this=lateral)
-                    joins_list.append(join)
-                else:
-                    break
-            if joins:
-                for join in self._parse_joins():
-                    joins_list.append(join)
-            if main_table is not None and joins_list:
-                for join in joins_list:
-                    main_table.append("joins", join)
-            return main_table
-
-        def _parse_convert(
-            self, strict: bool, safe: t.Optional[bool] = None
-        ) -> t.Optional[exp.Expression]:
-            to = self._parse_types()
-            this = self._parse_bitwise()
-            return self.expression(exp.TryCast, this=this, to=to, safe=safe)
-
-        def _parse_approximate_count(self) -> t.Optional[exp.ApproxDistinct]:
-            index = self._index - 1
-            func = self._parse_function()
-
-            if isinstance(func, exp.Count) and isinstance(func.this, exp.Distinct):
-                return self.expression(exp.ApproxDistinct, this=seq_get(func.this.expressions, 0))
-            self._retreat(index)
-            return None
-
-        def _parse_alias(self, this: t.Optional[exp.Expression], explicit: bool = False) -> t.Optional[exp.Alias]:
-            """Override to track explicit AS keyword usage"""
-            # 先检查是否有AS关键字，但不消费它
-            has_as_keyword = self._match(TokenType.ALIAS, advance=False)
-            
-            # 调用父类方法来处理别名解析，它会正确处理AS关键字
-            alias = super()._parse_alias(this, explicit)
-            
-            # 如果解析成功且有AS关键字，设置标记
-            if alias and has_as_keyword and isinstance(alias, exp.Alias):
-                alias.set("explicit_as", True)
-                
-            return alias
-
-        def _parse_projections(self) -> t.List[exp.Expression]:
-            if self._match_texts(["COLUMNS"]):
-                # COLUMNS('regex') 或 COLUMNS("regex")
-                if not self._match(TokenType.L_PAREN):
-                    self.raise_error("COLUMNS后必须跟左括号")
-                
-                # 解析COLUMNS的参数 - 可以是字符串或标识符
-                if self._curr and self._curr.token_type == TokenType.STRING:
-                    this = self._parse_string()
-                elif self._curr and self._curr.token_type == TokenType.IDENTIFIER:
-                    # 处理双引号标识符作为字符串
-                    this = self._parse_id_var()
-                else:
-                    self.raise_error("COLUMNS参数必须是字符串")
-                
-                if not self._match(TokenType.R_PAREN):
-                    self.raise_error("COLUMNS缺少右括号")
-                
-                columns = self.expression(exp.Columns, this=this)
-                
-                # EXCEPT (f1, f2)
-                if self._match_texts(["EXCEPT"]):
-                    self._match_l_paren()
-                    excepts = self._parse_csv(self._parse_id_var)
-                    if not excepts:
-                        self.raise_error("COLUMNS EXCEPT子句不能为空")
-                    self._match_r_paren()
-                    columns.set("except", excepts)
-                # REPLACE (expr AS col, ...)
-                if self._match_texts(["REPLACE"]):
-                    self._match_l_paren()
-                    replaces = self._parse_csv(lambda: self._parse_alias(self._parse_expression()))
-                    if not replaces:
-                        self.raise_error("COLUMNS REPLACE子句不能为空")
-                    # 验证REPLACE中的表达式
-                    for replace in replaces:
-                        if not isinstance(replace, exp.Alias):
-                            self.raise_error("COLUMNS REPLACE子句必须包含AS别名表达式")
-                    self._match_r_paren()
-                    columns.set("replace", replaces)
-                # AS "host_{0}"/AS ...
-                if self._match_texts(["AS"]):
-                    # 兼容字符串、双引号标识符和普通标识符
-                    if self._curr and self._curr.token_type == TokenType.STRING:
-                        alias = self._parse_string()
-                    elif self._curr and self._curr.token_type in (TokenType.IDENTIFIER, TokenType.VAR):
-                        alias = self._parse_id_var()
-                    elif self._curr and self._curr.token_type == TokenType.NUMBER:
-                        # 数字不能作为别名
-                        self.raise_error("COLUMNS AS后不能使用数字作为别名")
-                    else:
-                        # 尝试解析双引号标识符 - sqlglot会自动处理引号
-                        try:
-                            alias = self._parse_id_var()
-                        except:
-                            self.raise_error("COLUMNS AS后必须为字符串或标识符")
-                    columns.set("alias", alias)
-                
-                # 开始处理投影列表，COLUMNS是第一个
-                projections = [columns]
-                
-                # 继续解析后续的投影表达式
-                while self._match(TokenType.COMMA):
-                    expr = self._parse_expression()
-                    if expr is None:
-                        break
-                    
-                    # 使用 _parse_alias 处理别名
-                    alias = self._parse_alias(expr)
-                    if alias:
-                        projections.append(alias)
-                    else:
-                        projections.append(expr)
-                
-                return projections
-                
-            # 其它主流投影走PG，但补充省略AS的写法
-            projections = []
-            while True:
-                expr = self._parse_expression()
-                if expr is None:
-                    break
-                
-                # 使用 _parse_alias 处理别名
-                alias = self._parse_alias(expr)
-                if alias:
-                    projections.append(alias)
-                else:
-                    projections.append(expr)
-                    
-                if not self._match(TokenType.COMMA):
-                    break
-            return projections
-
-        def _parse_with(self, skip_with_token: bool = False) -> t.Optional[exp.With]:
-            if not skip_with_token and not self._match(TokenType.WITH):
-                return None
-
-            comments = self._prev_comments
-            if self._match(TokenType.RECURSIVE):
-                self.raise_error("炎凰SQL不支持WITH RECURSIVE递归CTE")
-            last_comments = None
-            expressions = []
-            while True:
-                cte = self._parse_cte()
-                if isinstance(cte, exp.CTE):
-                    expressions.append(cte)
-                    if last_comments:
-                        cte.add_comments(last_comments)
-                if not self._match(TokenType.COMMA) and not self._match(TokenType.WITH):
-                    break
-                else:
-                    self._match(TokenType.WITH)
-                last_comments = self._prev_comments
             return self.expression(
-                exp.With,
-                comments=comments,
-                expressions=expressions,
-                recursive=False,
-                search=None,
+                exp.UnicodeString,
+                this=content,
+                prefix="U&"
             )
 
-        def _parse_statement(self):
-            """解析语句并应用炎凰SQL特定的转换和限制检查"""
-            # 直接回退到父类实现，避免复杂的自定义逻辑导致问题
-            try:
-                statement = super()._parse_statement()
-                if statement is None:
-                    return None
-                
-                # 对所有语句都应用集合操作检查
-                statement = self._check_unsupported_set_operations(statement)
-                
-                # 根据语句类型应用特定检查
-                if isinstance(statement, exp.Select):
-                    statement = self._apply_window_function_transforms(statement)
-                    statement = self._check_unsupported_window_features(statement)
-                    statement = self._check_correlated_subqueries(statement)
-                    statement = self._check_window_function_restrictions(statement)
-                    statement = self._check_tablesample_limitations(statement)
-                    statement = self._check_distinct_limitations(statement)
-                    statement = self._check_complex_types(statement)
-                elif isinstance(statement, exp.Delete):
-                    statement = self._check_delete_limitations(statement)
-                    statement = self._check_complex_types(statement)
-                elif isinstance(statement, exp.Create):
-                    statement = self._check_table_ddl_limitations(statement)
-                    statement = self._check_complex_types(statement)
-                else:
-                    # 对其他类型的语句也检查复杂类型
-                    statement = self._check_complex_types(statement)
-                
-                return statement
-            except AttributeError as e:
-                if "'NoneType' object has no attribute 'add_comments'" in str(e):
-                    # 如果父类返回None但尝试调用add_comments，返回None
-                    return None
-                raise
+        def _parse_alias(
+            self, this: t.Optional[exp.Expression], explicit: bool = False
+        ) -> t.Optional[exp.Expression]:
+            """重写_parse_alias方法来正确处理explicit_as标记"""
+            # 检查是否能解析LIMIT或OFFSET子句
+            if self._can_parse_limit_or_offset():
+                return this
 
-        def _apply_window_function_transforms(self, statement):
-            """应用窗口函数兼容性转换（智能降级）"""
-            if not isinstance(statement, exp.Select):
-                return statement
-            
-            # 1. 转换ORDER BY中的窗口函数
-            statement = self._transform_order_by_window_functions(statement)
-            
-            # 2. 转换窗口函数运算表达式
-            statement = self._transform_window_function_arithmetic(statement)
-            
-            # 3. 转换WINDOW子句为内联OVER子句
-            statement = self._transform_window_clauses(statement)
-            
-            return statement
+            # 检查是否有显式的AS关键字
+            any_token = self._match(tokens.TokenType.ALIAS)
+            comments = self._prev_comments or []
 
-        def _transform_order_by_window_functions(self, statement):
-            """转换ORDER BY中的窗口函数为子查询"""
-            if not statement.args.get("order"):
-                return statement
-            
-            window_expressions = []
-            for order_expr in statement.args["order"].expressions:
-                windows = list(order_expr.find_all(exp.Window))
-                if windows:
-                    window_expressions.extend(windows)
-            
-            if not window_expressions:
-                return statement
-            
-            # 创建窗口函数表达式别名
-            window_aliases = []
-            for i, window_expr in enumerate(window_expressions):
-                alias_name = f"__window_expr_{i + 1}"
-                window_aliases.append((window_expr, alias_name))
-            
-            # 修改SELECT投影，添加窗口函数
-            new_expressions = list(statement.expressions or [])
-            for window_expr, alias_name in window_aliases:
-                alias = self.expression(exp.Alias, this=window_expr.copy(), alias=alias_name)
-                new_expressions.append(alias)
-            
-            # 修改ORDER BY，替换窗口函数为别名引用
-            new_order_expressions = []
-            for order_expr in statement.args["order"].expressions:
-                new_expr = order_expr.copy()
-                # 使用transform方法来替换窗口函数
-                for window_expr, alias_name in window_aliases:
-                    def replace_window(node):
-                        if node == window_expr:
-                            return exp.Column(this=alias_name)
-                        return node
-                    new_expr = new_expr.transform(replace_window)
-                new_order_expressions.append(new_expr)
-            
-            # 创建子查询
-            inner_select = statement.copy()
-            inner_select.set("expressions", new_expressions)
-            inner_select.set("order", None)  # 移除内层ORDER BY
-            
-            # 创建外层查询
-            outer_select = self.expression(
-                exp.Select,
-                expressions=[exp.Star()],
-                **{"from": self.expression(exp.From, this=self.expression(exp.Subquery, this=inner_select, alias="__window_subquery"))}
-            )
-            
-            # 设置新的ORDER BY
-            outer_select.set("order", self.expression(exp.Order, expressions=new_order_expressions))
-            
-            # 保留其他子句（如LIMIT等）
-            for clause in ["limit", "offset"]:
-                if statement.args.get(clause):
-                    outer_select.set(clause, statement.args[clause])
-                    inner_select.set(clause, None)
-            
-            return outer_select
+            if explicit and not any_token:
+                return this
 
-        def _transform_window_function_arithmetic(self, statement):
-            """转换窗口函数运算表达式为子查询"""
-            window_expressions = []
-            
-            # 查找所有包含窗口函数运算的表达式
-            for expr in statement.expressions or []:
-                windows_in_arithmetic = self._find_window_arithmetic_expressions(expr)
-                window_expressions.extend(windows_in_arithmetic)
-            
-            if not window_expressions:
-                return statement
-            
-            # 为每个窗口函数创建别名
-            window_aliases = []
-            for i, window_expr in enumerate(window_expressions):
-                alias_name = f"__window_expr_{i + 1}"
-                window_aliases.append((window_expr, alias_name))
-            
-            # 修改SELECT投影
-            new_expressions = []
-            for expr in statement.expressions or []:
-                new_expr = expr.copy()
-                # 替换窗口函数运算为分离的表达式
-                for window_expr, alias_name in window_aliases:
-                    def replace_window(node):
-                        if node == window_expr:
-                            return exp.Column(this=alias_name)
-                        return node
-                    new_expr = new_expr.transform(replace_window)
-                new_expressions.append(new_expr)
-            
-            # 创建子查询
-            inner_select = statement.copy()
-            inner_select.set("expressions", [exp.Star()] + [
-                self.expression(exp.Alias, this=window_expr.copy(), alias=alias_name)
-                for window_expr, alias_name in window_aliases
-            ])
-            
-            # 创建外层查询
-            outer_select = self.expression(
-                exp.Select,
-                expressions=new_expressions,
-                **{"from": self.expression(exp.From, this=self.expression(exp.Subquery, this=inner_select, alias="__window_subquery"))}
-            )
-            
-            # 复制其他子句
-            for clause in ["where", "group", "having", "order", "limit", "offset"]:
-                if statement.args.get(clause):
-                    outer_select.set(clause, statement.args[clause])
-            
-            return outer_select
+            if self._match(tokens.TokenType.L_PAREN):
+                aliases = self.expression(
+                    exp.Aliases,
+                    comments=comments,
+                    this=this,
+                    expressions=self._parse_csv(lambda: self._parse_id_var(any_token)),
+                )
+                self._match_r_paren(aliases)
+                return aliases
 
-        def _find_window_arithmetic_expressions(self, expr):
-            """查找表达式中的窗口函数运算"""
-            windows = []
-            
-            if expr is None:
-                return windows
-            
-            # 只在运算表达式中查找窗口函数，不处理单独的窗口函数
-            if isinstance(expr, exp.Binary):
-                # 检查左右操作数是否为窗口函数 - 这才是真正的窗口函数运算
-                left_is_window = isinstance(expr.this, exp.Window)
-                right_is_window = isinstance(expr.expression, exp.Window)
-                
-                if left_is_window or right_is_window:
-                    # 这是窗口函数参与的运算，需要转换
-                    if left_is_window:
-                        windows.append(expr.this)
-                    if right_is_window:
-                        windows.append(expr.expression)
-                else:
-                    # 递归检查子表达式中的窗口函数运算
-                    windows.extend(self._find_window_arithmetic_expressions(expr.this))
-                    windows.extend(self._find_window_arithmetic_expressions(expr.expression))
-            elif isinstance(expr, exp.Unary):
-                # 一元运算符作用于窗口函数
-                if isinstance(expr.this, exp.Window):
-                    windows.append(expr.this)
-                else:
-                    windows.extend(self._find_window_arithmetic_expressions(expr.this))
-            # 不要将单独的窗口函数视为需要转换的情况
-            # elif isinstance(expr, exp.Window):
-            #     # 直接是窗口函数 - 这是标准用法，不需要转换
-            #     pass
-            elif hasattr(expr, 'expressions') and expr.expressions is not None:
-                # 有expressions属性的表达式类型（如Coalesce, Anonymous等）
-                try:
-                    for sub_expr in expr.expressions:
-                        windows.extend(self._find_window_arithmetic_expressions(sub_expr))
-                except TypeError:
-                    # 如果expressions不可迭代，跳过
-                    pass
-            elif hasattr(expr, 'args') and expr.args:
-                # 通过args属性遍历其他子表达式
-                for key, value in expr.args.items():
-                    if isinstance(value, exp.Expression):
-                        windows.extend(self._find_window_arithmetic_expressions(value))
-                    elif isinstance(value, list):
-                        for item in value:
-                            if isinstance(item, exp.Expression):
-                                windows.extend(self._find_window_arithmetic_expressions(item))
-            
-            return windows
-
-        def _transform_window_clauses(self, statement):
-            """转换WINDOW子句为内联OVER子句"""
-            if not statement.args.get("windows"):
-                return statement
-            
-            # 获取WINDOW定义
-            window_definitions = {}
-            for window_def in statement.args["windows"]:
-                if hasattr(window_def, 'this'):
-                    # window_def是Window对象，this是窗口名
-                    window_name = str(window_def.this)
-                    window_definitions[window_name] = window_def
-            
-            # 在SELECT投影中查找窗口函数引用
-            new_expressions = []
-            for expr in statement.expressions or []:
-                def replace_window_refs(node):
-                    if isinstance(node, exp.Window):
-                        # 检查是否是窗口名引用（如 COUNT(*) OVER w）
-                        # 在这种情况下，alias字段存储的是窗口名引用
-                        if (hasattr(node, 'alias') and node.alias and 
-                            str(node.alias) in window_definitions and
-                            node.args.get('over') == 'OVER' and
-                            not node.args.get('partition_by') and 
-                            not node.args.get('order')):
-                            # 这是一个窗口引用，用窗口定义替换
-                            window_def = window_definitions[str(node.alias)]
-                            new_window = node.copy()
-                            # 复制窗口规格到新窗口函数
-                            if window_def.args.get('partition_by'):
-                                new_window.set('partition_by', window_def.args['partition_by'])
-                            if window_def.args.get('order'):
-                                new_window.set('order', window_def.args['order'])
-                            if window_def.args.get('spec'):
-                                new_window.set('spec', window_def.args['spec'])
-                            # 移除窗口名引用
-                            new_window.set('alias', None)
-                            return new_window
-                    return node
-                
-                new_expr = expr.transform(replace_window_refs)
-                new_expressions.append(new_expr)
-            
-            # 创建新的语句，移除WINDOW子句
-            new_statement = statement.copy()
-            new_statement.set("expressions", new_expressions)
-            new_statement.set("windows", None)
-            
-            return new_statement
-
-        def _check_unsupported_window_features(self, statement):
-            """检查无法降级的窗口函数功能"""
-            if statement is None:
-                return None
-                
-            def check_node(node):
-                if isinstance(node, exp.Window):
-                    # 检查RANGE框架
-                    spec = node.args.get("spec")
-                    if spec and hasattr(spec, 'args'):
-                        # spec.args中包含kind信息
-                        kind_str = spec.args.get('kind')
-                        
-                        if kind_str == "RANGE":
-                            self.raise_error("RANGE window frames are not supported in Yanhuang SQL, use ROWS instead")
-                        elif kind_str == "GROUPS":
-                            self.raise_error("GROUPS window frames are not supported in Yanhuang SQL, use ROWS instead")
-                
-                return node
-            
-            return statement.transform(check_node)
-
-        def _check_correlated_subqueries(self, statement):
-            """检查关联子查询限制"""
-            # 暂时简化：跳过复杂的关联子查询检查
-            # 这个功能需要更深入的AST分析，暂时禁用
-            return statement
-
-        def _check_window_function_restrictions(self, statement):
-            """检查窗口函数使用限制"""
-            if statement is None:
-                return None
-                
-            def check_node(node):
-                # 简化：暂时跳过复杂的窗口函数限制检查
-                return node
-            
-            return statement.transform(check_node)
-
-        def _check_unsupported_set_operations(self, statement):
-            """检查不支持的集合操作"""
-            if statement is None:
-                return None
-                
-            def check_node(node):
-                if isinstance(node, exp.Intersect):
-                    self.raise_error("INTERSECT is not supported in Yanhuang SQL")
-                elif isinstance(node, exp.Except):
-                    self.raise_error("EXCEPT is not supported in Yanhuang SQL")
-                
-                return node
-            
-            return statement.transform(check_node)
-
-        def _check_tablesample_limitations(self, statement):
-            """检查TABLESAMPLE限制"""
-            if statement is None:
-                return None
-                
-            # 炎凰SQL现在支持SAMPLE语法，不再需要检查TableSample
-            # 只检查原始的TABLESAMPLE关键字使用（这个在tokenizer层面处理）
-            return statement
-
-        def _check_distinct_limitations(self, statement):
-            """检查DISTINCT使用限制"""
-            if statement is None:
-                return None
-                
-            def check_node(node):
-                if isinstance(node, exp.Select) and node.args.get("group"):
-                    # 检查GROUP BY查询中的聚合DISTINCT限制
-                    for expr in node.expressions:
-                        self._check_aggregate_distinct_in_group_by(expr)
-                
-                return node
-            
-            return statement.transform(check_node)
-
-        def _check_aggregate_distinct_in_group_by(self, expr):
-            """检查GROUP BY中的聚合DISTINCT限制"""
-            def check_agg_node(node):
-                if isinstance(node, (exp.Sum, exp.Avg, exp.Min, exp.Max)) and isinstance(node.this, exp.Distinct):
-                    self.raise_error(f"炎凰SQL在GROUP BY中不支持{node.__class__.__name__}(DISTINCT ...)")
-                # COUNT(DISTINCT)是允许的，不检查
-                for child in node.iter_expressions():
-                    check_agg_node(child)
-            
-            check_agg_node(expr)
-
-        def _check_delete_limitations(self, statement):
-            """检查DELETE语句限制"""
-            if statement is None:
-                return None
-                
-            def check_node(node):
-                if isinstance(node, exp.Delete):
-                    # 检查RETURNING子句
-                    if node.args.get("returning"):
-                        self.raise_error("DELETE RETURNING is not supported in Yanhuang SQL")
-                    
-                    # 检查USING子句
-                    if node.args.get("using"):
-                        self.raise_error("DELETE USING is not supported in Yanhuang SQL")
-                
-                return node
-            
-            return statement.transform(check_node)
-
-        def _check_table_ddl_limitations(self, statement):
-            """检查表DDL限制"""
-            if statement is None:
-                return None
-                
-            def check_node(node):
-                if isinstance(node, exp.Create) and node.args.get("kind") == "TABLE":
-                    # 检查schema中的约束
-                    schema = node.args.get("this")  # schema在this字段中
-                    if schema and isinstance(schema, exp.Schema) and hasattr(schema, 'expressions'):
-                        for expr in schema.expressions:
-                            if isinstance(expr, exp.ColumnDef):
-                                # 检查列级约束
-                                constraints = expr.args.get("constraints", [])
-                                for constraint in constraints:
-                                    if isinstance(constraint, exp.ColumnConstraint):
-                                        kind = constraint.args.get("kind")
-                                        if isinstance(kind, exp.PrimaryKeyColumnConstraint):
-                                            self.raise_error("PRIMARY KEY constraints are not supported in Yanhuang SQL")
-                                        elif isinstance(kind, exp.Reference):
-                                            self.raise_error("FOREIGN KEY constraints are not supported in Yanhuang SQL")
-                                        elif isinstance(kind, exp.UniqueColumnConstraint):
-                                            self.raise_error("UNIQUE constraints are not supported in Yanhuang SQL")
-                                        elif isinstance(kind, exp.CheckColumnConstraint):
-                                            self.raise_error("CHECK constraints are not supported in Yanhuang SQL")
-                                    # 直接的约束类型（不在ColumnConstraint包装中）
-                                    elif isinstance(constraint, exp.PrimaryKeyColumnConstraint):
-                                        self.raise_error("PRIMARY KEY constraints are not supported in Yanhuang SQL")
-                                    elif isinstance(constraint, exp.Reference):
-                                        self.raise_error("FOREIGN KEY constraints are not supported in Yanhuang SQL")
-                                    elif isinstance(constraint, exp.UniqueColumnConstraint):
-                                        self.raise_error("UNIQUE constraints are not supported in Yanhuang SQL")
-                                    elif isinstance(constraint, exp.CheckColumnConstraint):
-                                        self.raise_error("CHECK constraints are not supported in Yanhuang SQL")
-                            # 表级约束
-                            elif isinstance(expr, exp.PrimaryKey):
-                                self.raise_error("PRIMARY KEY constraints are not supported in Yanhuang SQL")
-                            elif isinstance(expr, exp.ForeignKey):
-                                self.raise_error("FOREIGN KEY constraints are not supported in Yanhuang SQL")
-                            elif isinstance(expr, exp.Unique):
-                                self.raise_error("UNIQUE constraints are not supported in Yanhuang SQL")
-                            elif isinstance(expr, exp.Check):
-                                self.raise_error("CHECK constraints are not supported in Yanhuang SQL")
-                
-                return node
-            
-            return statement.transform(check_node)
-
-        def _check_complex_types(self, statement):
-            """检查复杂类型使用限制"""
-            if statement is None:
-                return None
-                
-            def check_node(node):
-                # 检查ARRAY类型和字面量
-                if isinstance(node, exp.Array):
-                    self.raise_error("ARRAY types are not supported in Yanhuang SQL")
-                elif isinstance(node, exp.DataType):
-                    # 检查数据类型
-                    type_name = node.this
-                    if isinstance(type_name, exp.DataType.Type):
-                        type_str = type_name.value
-                    else:
-                        type_str = str(type_name).upper()
-                    
-                    # 移除VARBINARY，因为炎凰SQL支持VARBINARY
-                    unsupported_types = ['JSONB', 'JSON', 'BYTEA', 'ARRAY', 'HSTORE', 'UUID']
-                    if type_str in unsupported_types:
-                        self.raise_error(f"{type_str} type is not supported in Yanhuang SQL")
-                
-                # 检查PostgreSQL特有的类型转换语法
-                elif isinstance(node, exp.Cast):
-                    to_type = node.args.get("to")
-                    if to_type and isinstance(to_type, exp.DataType):
-                        type_name = to_type.this
-                        if isinstance(type_name, exp.DataType.Type):
-                            type_str = type_name.value
-                        else:
-                            type_str = str(type_name).upper()
-                        
-                        # 检查不支持的类型转换，但VARBINARY是支持的
-                        unsupported_types = ['JSONB', 'JSON', 'BYTEA', 'ARRAY']
-                        if type_str in unsupported_types:
-                            self.raise_error(f"Casting to {type_str} type is not supported in Yanhuang SQL")
-                
-                return node
-            
-            return statement.transform(check_node)
-
-        def _parse_describe(self) -> t.Optional[exp.Describe]:
-            """解析DESCRIBE语句"""
-            self._match(TokenType.DESCRIBE)
-            return self.expression(
-                exp.Describe,
-                this=self._parse_table()
+            alias = self._parse_id_var(any_token, tokens=self.ALIAS_TOKENS) or (
+                self.STRING_ALIASES and self._parse_string_as_identifier()
             )
 
-        def _parse_delete(self) -> exp.Delete:
-            """
-            解析DELETE语句，支持炎凰SQL的增强语法：
-            DELETE FROM table WHERE condition ORDER BY column LIMIT number
-            """
-            # 先调用父类的DELETE解析器
-            delete_stmt = super()._parse_delete()
-            
-            # 如果父类解析成功，检查并添加ORDER BY和LIMIT支持
-            if delete_stmt:
-                # 检查是否有ORDER BY（父类可能没有解析）
-                if not delete_stmt.args.get("order"):
-                    order = self._parse_order()
-                    if order:
-                        delete_stmt.set("order", order)
-                
-                # 检查是否有LIMIT（父类可能没有解析）
-                if not delete_stmt.args.get("limit"):
-                    limit = self._parse_limit()
-                    if limit:
-                        delete_stmt.set("limit", limit)
-            
-            return delete_stmt
-
-        def _parse_values(self) -> t.Optional[exp.Values]:
-            """
-            解析VALUES语句，支持别名
-            VALUES (expression [, ...]) [, ...] [AS alias[(column1, column2, ...)]]
-            """
-            self._match(TokenType.VALUES)
-            
-            expressions = []
-            while True:
-                if not self._match(TokenType.L_PAREN):
-                    break
-                    
-                row_expressions = self._parse_csv(self._parse_expression)
-                if not self._match(TokenType.R_PAREN):
-                    self.raise_error("Expected ')' after VALUES row")
-                    
-                expressions.append(
-                    self.expression(exp.Tuple, expressions=row_expressions)
+            if alias:
+                comments.extend(alias.pop_comments())
+                # 创建Alias表达式
+                this = self.expression(
+                    exp.Alias, 
+                    comments=comments, 
+                    this=this, 
+                    alias=alias
                 )
                 
-                if not self._match(TokenType.COMMA):
-                    break
-            
-            values_expr = self.expression(exp.Values, expressions=expressions)
-            
-            # 检查是否有AS别名
-            if self._match(TokenType.ALIAS):
-                alias_name = self._parse_id_var()
-                if not alias_name:
-                    self.raise_error("Expected alias name after AS")
+                # 通过meta属性保存explicit_as信息
+                # 先访问meta属性让它自动初始化
+                _ = this.meta
+                this.meta["explicit_as"] = any_token
                 
-                # 检查是否有列名列表
-                column_names = None
-                if self._match(TokenType.L_PAREN):
-                    column_names = self._parse_csv(self._parse_id_var)
-                    if not self._match(TokenType.R_PAREN):
-                        self.raise_error("Expected ')' after column names")
-                
-                # 创建表别名结构
-                if column_names:
-                    # 创建TableAlias对象包含列名
-                    table_alias = self.expression(
-                        exp.TableAlias,
-                        this=alias_name,
-                        columns=column_names
-                    )
-                else:
-                    # 只有表别名，没有列名
-                    table_alias = self.expression(
-                        exp.TableAlias,
-                        this=alias_name
-                    )
-                
-                # 将VALUES包装为带别名的Alias表达式
-                return self.expression(exp.Alias, this=values_expr, alias=table_alias)
-            
-            return values_expr
-            
-        def _parse_show(self) -> t.Optional[exp.Show]:
-            """
-            解析SHOW语句
-            SHOW [FULL] TABLES [WHERE condition]
-            """
-            self._match(TokenType.SHOW)
-            
-            full = self._match_text_seq("FULL")
-            
-            if self._match_text_seq("TABLES"):
-                where = self._parse_where()
-                return self.expression(
-                    exp.Show,
-                    this="TABLES",
-                    full=full,
-                    where=where
-                )
-            else:
-                # 其他SHOW语句类型
-                target = self._parse_string() or self._parse_var()
-                return self.expression(
-                    exp.Show,
-                    this=target
-                )
+                column = this.this
 
-        def _parse_create_table_ddl(self) -> t.Optional[exp.Create]:
-            """
-            解析CREATE TABLE语句，支持炎凰SQL的ENGINE语法：
-            CREATE [OR REPLACE] TABLE table_name [ENGINE=engine_type [WITH (setting_1=value_1[, setting_2=value2, ...])]]
-            """
-            # 先调用父类的CREATE TABLE解析
-            create_stmt = super()._parse_create()
-            
-            if not create_stmt or create_stmt.args.get("kind") != "TABLE":
-                return create_stmt
-                
-            # 检查是否有ENGINE子句
-            if self._match_text_seq("ENGINE"):
-                self._match(TokenType.EQ)
-                engine_type = self._parse_var() or self._parse_string()
-                
-                if not engine_type:
-                    self.raise_error("Expected engine type after ENGINE=")
-                
-                # 检查是否有WITH子句
-                with_properties = None
-                if self._match_text_seq("WITH"):
-                    if not self._match(TokenType.L_PAREN):
-                        self.raise_error("Expected '(' after WITH")
-                    
-                    properties = []
-                    while not self._match(TokenType.R_PAREN):
-                        prop_name = self._parse_var() or self._parse_string()
-                        if not prop_name:
-                            self.raise_error("Expected property name")
-                            
-                        self._match(TokenType.EQ)
-                        prop_value = self._parse_primary()
-                        if not prop_value:
-                            self.raise_error("Expected property value")
-                            
-                        properties.append(
-                            self.expression(exp.Property, this=prop_name, value=prop_value)
-                        )
-                        
-                        if not self._match(TokenType.COMMA):
-                            break
-                    
-                    if not self._match(TokenType.R_PAREN):
-                        self.raise_error("Expected ')' after WITH properties")
-                        
-                    with_properties = properties
-                
-                # 将ENGINE和WITH信息添加到CREATE语句中
-                create_stmt.set("engine", engine_type)
-                if with_properties:
-                    create_stmt.set("engine_properties", with_properties)
-            
-            return create_stmt
-
-        def _parse_pivot_statement(self) -> t.Optional[exp.Pivot]:
-            """解析PIVOT语句"""
-            # PIVOT table_name ON pivot_column [IN (values)] USING aggregations GROUP BY columns [ORDER BY ...]
-            
-            # 解析表名
-            table = self._parse_table()
-            if not table:
-                self.raise_error("PIVOT语句必须指定表名")
-            
-            # 解析ON子句
-            if not self._match(TokenType.ON):
-                self.raise_error("PIVOT语句必须包含ON子句")
-            
-            pivot_column = self._parse_bitwise()
-            if not pivot_column:
-                self.raise_error("PIVOT ON子句必须指定透视列")
-            
-            # 解析可选的IN子句
-            pivoted_values = None
-            if self._match(TokenType.IN):
-                self._match_l_paren()
-                # 修复：解析带引号的字符串字面量
-                pivoted_values = []
-                while not self._curr or self._curr.token_type != TokenType.R_PAREN:
-                    # 尝试解析字符串、数字或标识符
-                    if self._curr.token_type == TokenType.STRING:
-                        value = self._parse_string()
-                    elif self._curr.token_type == TokenType.NUMBER:
-                        value = self._parse_number()
-                    elif self._curr.token_type in (TokenType.VAR, TokenType.IDENTIFIER):
-                        value = self._parse_id_var()
-                    else:
-                        # 使用通用表达式解析
-                        value = self._parse_bitwise()
-                    
-                    if value:
-                        pivoted_values.append(value)
-                    
-                    if not self._match(TokenType.COMMA):
-                        break
-                
-                self._match_r_paren()
-            
-            # 解析USING子句
-            if not self._match(TokenType.USING):
-                self.raise_error("PIVOT语句必须包含USING子句")
-            
-            using_expressions = self._parse_csv(self._parse_expression)
-            if not using_expressions:
-                self.raise_error("PIVOT USING子句不能为空")
-            
-            # 解析GROUP BY子句
-            group_by = None
-            if self._match(TokenType.GROUP_BY):
-                # 使用特殊的GROUP BY解析逻辑来支持TIME()函数
-                group_by_expr = self._parse_group(skip_group_by_token=True)
-                if group_by_expr:
-                    group_by = group_by_expr.expressions
-            
-            # 构造fields参数 - 包含透视列和可选的值列表
-            fields = []
-            if pivoted_values:
-                # 创建一个In表达式来表示 pivot_column IN (values)
-                in_expr = self.expression(exp.In, this=pivot_column, expressions=pivoted_values)
-                fields.append(in_expr)
-            else:
-                # 只有透视列，没有IN子句
-                fields.append(pivot_column)
-            
-            # 构造group参数
-            group_expr = None
-            if group_by:
-                group_expr = self.expression(exp.Group, expressions=group_by)
-            
-            # 解析ORDER BY子句 - 修复：使用正确的方法解析ORDER BY
-            order_by = self._parse_order()
-            
-            # 创建PIVOT表达式
-            pivot = self.expression(
-                exp.Pivot,
-                this=table,
-                expressions=using_expressions,  # USING部分的聚合表达式
-                fields=fields,                  # ON部分的透视字段
-                group=group_expr               # GROUP BY部分
-            )
-            
-            # 如果有ORDER BY，创建包装的SELECT查询
-            if order_by:
-                select = self.expression(
-                    exp.Select,
-                    expressions=[exp.Star()],
-                    **{"from": self.expression(exp.From, this=pivot)},
-                    order=order_by
-                )
-                return select
-            
-            return pivot
-
-        def _parse_wrapped_select(self, table: bool = False) -> t.Optional[exp.Expression]:
-            """重写_parse_wrapped_select方法以支持炎凰SQL的PIVOT语法"""
-            if self._match_set((TokenType.PIVOT, TokenType.UNPIVOT)):
-                if self._prev.token_type == TokenType.PIVOT:
-                    # 使用炎凰SQL的PIVOT解析方法
-                    this: t.Optional[exp.Expression] = self._parse_pivot_statement()
-                else:
-                    # UNPIVOT仍使用标准方法
-                    this: t.Optional[exp.Expression] = self._parse_simplified_pivot(is_unpivot=True)
-            elif self._match(TokenType.FROM):
-                from_ = self._parse_from(skip_from_token=True)
-                # Support parentheses for duckdb FROM-first syntax
-                select = self._parse_select()
-                if select:
-                    select.set("from", from_)
-                    this = select
-                else:
-                    this = exp.select("*").from_(t.cast(exp.From, from_))
-            else:
-                this = (
-                    self._parse_table()
-                    if table
-                    else self._parse_select(nested=True, parse_set_operation=False)
-                )
-
-                # Transform exp.Values into a exp.Table to pass through parse_query_modifiers
-                # in case a modifier (e.g. join) is following
-                if table and isinstance(this, exp.Values) and this.alias:
-                    alias = this.args["alias"].pop()
-                    this = exp.Table(this=this, alias=alias)
-
-                this = self._parse_query_modifiers(self._parse_set_operations(this))
+                # 将注释移到别名旁边
+                if not this.comments and column and column.comments:
+                    this.comments = column.pop_comments()
 
             return this
 
-        def _parse_table_sample(self, as_modifier: bool = False) -> t.Optional[exp.TableSample]:
-            """解析SAMPLE语法，支持炎凰SQL的SAMPLE ROW|BLOCK语法"""
-            # 检查是否是TABLESAMPLE关键字，如果是则拒绝
-            if self._match_texts(["TABLESAMPLE"]):
-                self.raise_error("炎凰SQL不支持TABLESAMPLE语法，请使用SAMPLE语法")
-            
-            # 消费SAMPLE token
-            if not self._match(TokenType.TABLE_SAMPLE):
-                return None
-            
-            # 解析采样方法：ROW 或 BLOCK
-            method = None
-            if self._match(TokenType.ROW) or self._match_texts(["BERNOULLI"]):
-                method = exp.var("ROW")
-            elif self._match_texts(["BLOCK"]) or self._match_texts(["SYSTEM"]):
-                method = exp.var("BLOCK")
-            else:
-                # 如果没有指定方法，默认为ROW
-                method = exp.var("ROW")
-            
-            # 解析概率值
-            if not self._match(TokenType.L_PAREN):
-                self.raise_error("SAMPLE语法需要括号包围概率值")
-            
-            percent = self._parse_number()
-            if not percent:
-                self.raise_error("SAMPLE语法需要指定概率值")
-            
-            if not self._match(TokenType.R_PAREN):
-                self.raise_error("SAMPLE语法缺少右括号")
-            
+        def _parse_values(self) -> exp.Values:
+            """解析VALUES语句"""
             return self.expression(
-                exp.TableSample,
-                method=method,
-                percent=percent
+                exp.Values,
+                expressions=self._parse_csv(self._parse_value),
+                alias=self._parse_table_alias(),
             )
 
-        def _parse_group(self, skip_group_by_token: bool = False) -> t.Optional[exp.Group]:
-            """Override to support GROUP BY TIME() syntax"""
-            if not skip_group_by_token and not self._match(TokenType.GROUP_BY):
-                return None
+        def _parse_columns_with_ops(self) -> exp.Columns:
+            """解析COLUMNS函数，支持EXCEPT、REPLACE和RENAME子句"""
+            # 解析COLUMNS(regex)的基础部分
+            this = self._parse_expression()
+            
+            # 创建COLUMNS表达式
+            columns_expr = self.expression(exp.Columns, this=this)
+            
+            return columns_expr
+            
+        def _parse_function(
+            self,
+            functions: t.Optional[t.Dict[str, t.Callable]] = None,
+            anonymous: bool = False,
+            optional_parens: bool = True,
+            any_token: bool = False,
+        ) -> t.Optional[exp.Expression]:
+            """重写_parse_function方法来正确处理COLUMNS函数的EXCEPT语法"""
+            # 调用父类方法
+            result = super()._parse_function(functions, anonymous, optional_parens, any_token)
+            
+            # 如果解析的是COLUMNS函数，检查是否有EXCEPT、REPLACE或RENAME
+            if isinstance(result, exp.Columns):
+                result.set("unpack", True)
+                
+                # 解析EXCEPT、REPLACE和RENAME子句
+                except_expressions = self._parse_star_op("EXCEPT", "EXCLUDE")
+                replace_expressions = self._parse_star_op("REPLACE")
+                rename_expressions = self._parse_star_op("RENAME")
+                
+                # 设置到COLUMNS表达式中
+                if except_expressions:
+                    result.set("except", except_expressions)
+                if replace_expressions:
+                    result.set("replace", replace_expressions)
+                if rename_expressions:
+                    result.set("rename", rename_expressions)
+                    
+            return result
 
-            expressions = []
+        def _parse_columns(self) -> exp.Columns:
+            """解析COLUMNS函数，基础版本，EXCEPT和REPLACE在表达式层面处理"""
+            # COLUMNS(regex)
+            this = self._parse_expression()
+            
+            return self.expression(
+                exp.Columns,
+                this=this,
+            )
 
-            while True:
-                # 检查TIME()语法
-                if self._match_texts(["TIME"]):
-                    if not self._match(TokenType.L_PAREN):
-                        self.raise_error("TIME后必须跟括号")
-
-                    # 解析TIME()参数，格式为key=value
-                    time_args = []
-                    while True:
-                        # 尝试解析参数名
-                        if self._curr:
-                            key_expr = self._parse_id_var()
-                            if key_expr:
-                                if not self._match(TokenType.EQ):
-                                    self.raise_error("TIME参数期望格式为key=value")
-                                value = self._parse_string() or self._parse_number() or self._parse_id_var()
-                                if not value:
-                                    self.raise_error("TIME参数值不能为空")
-                                
-                                # 创建参数表达式，使用PropertyEQ来表示key=value
-                                param_expr = self.expression(
-                                    exp.PropertyEQ,
-                                    this=key_expr,
-                                    expression=value
-                                )
-                                time_args.append(param_expr)
-                            else:
-                                break
-                        else:
-                            break
+        def _parse_star_ops(self) -> t.Optional[exp.Expression]:
+            """重写_parse_star_ops方法来正确处理COLUMNS函数的EXCEPT和REPLACE语法"""
+            # 完全重写：首先检查COLUMNS函数
+            if self._match_texts(("COLUMNS",), advance=False):
+                this = self._parse_function()
+                if isinstance(this, exp.Columns):
+                    this.set("unpack", True)
+                    
+                    # 解析EXCEPT、REPLACE和RENAME子句
+                    except_expressions = self._parse_star_op("EXCEPT", "EXCLUDE")
+                    replace_expressions = self._parse_star_op("REPLACE")
+                    rename_expressions = self._parse_star_op("RENAME")
+                    
+                    # 设置到COLUMNS表达式中
+                    if except_expressions:
+                        this.set("except", except_expressions)
+                    if replace_expressions:
+                        this.set("replace", replace_expressions)
+                    if rename_expressions:
+                        this.set("rename", rename_expressions)
                         
-                        if not self._match(TokenType.COMMA):
-                            break
+                return this
 
-                    if not self._match(TokenType.R_PAREN):
-                        self.raise_error("TIME()缺少右括号")
+            # 处理普通的*表达式
+            return self.expression(
+                exp.Star,
+                **{  # type: ignore
+                    "except": self._parse_star_op("EXCEPT", "EXCLUDE"),
+                    "replace": self._parse_star_op("REPLACE"),
+                    "rename": self._parse_star_op("RENAME"),
+                },
+            )
 
-                    # 创建TIME特殊表达式
-                    time_expr = self.expression(
-                        exp.Anonymous,
-                        this="TIME",
-                        expressions=time_args
-                    )
-                    expressions.append(time_expr)
+        def _parse_describe(self) -> exp.Describe:
+            """解析DESCRIBE语句"""
+            table = self._parse_table()
+            return self.expression(exp.Describe, this=table)
+
+        def _parse_show(self) -> exp.Show:
+            """解析SHOW语句"""
+            full = self._match_text_seq("FULL")
+            kind = self._parse_var() or self._parse_string()
+            
+            # 处理复杂情况，如 "SHOW FULL TABLES WHERE ..."
+            if full and kind:
+                # 将 "FULL" 和 kind 组合
+                if isinstance(kind, exp.Var):
+                    combined_kind = f"FULL {kind.this}"
+                    kind = exp.Var(this=combined_kind)
+                elif isinstance(kind, exp.Literal):
+                    combined_kind = f"FULL {kind.this}"
+                    kind = exp.Literal.string(combined_kind)
+            
+            # 解析可选的WHERE子句
+            where = None
+            if self._match(TokenType.WHERE):
+                where = self._parse_assignment()
+            
+            # 解析可选的FROM子句
+            from_table = None
+            if self._match(TokenType.FROM):
+                from_table = self._parse_table()
+            
+            return self.expression(
+                exp.Show, 
+                this=kind, 
+                **{"from": from_table}, 
+                where=where,
+                full=full
+            )
+
+        def _parse_simplified_pivot(self, is_unpivot: t.Optional[bool] = None) -> exp.Pivot:
+            """
+            解析简化PIVOT语法，支持炎凰SQL的ORDER BY子句
+            语法格式：PIVOT table ON column [IN (values)] USING aggregates GROUP BY columns ORDER BY columns
+            """
+            def _parse_on() -> t.Optional[exp.Expression]:
+                this = self._parse_bitwise()
+
+                if self._match(TokenType.IN):
+                    # PIVOT ... ON col IN (row_val1, row_val2)
+                    return self._parse_in(this)
+                if self._match(TokenType.ALIAS, advance=False):
+                    # UNPIVOT ... ON (col1, col2, col3) AS row_val
+                    return self._parse_alias(this)
+
+                return this
+
+            this = self._parse_table()
+            expressions = self._match(TokenType.ON) and self._parse_csv(_parse_on)
+            into = self._parse_unpivot_columns()
+            using = self._match(TokenType.USING) and self._parse_csv(
+                lambda: self._parse_alias(self._parse_function())
+            )
+            group = self._parse_group()
+            
+            # 炎凰SQL特有：支持ORDER BY子句
+            order = None
+            if self._match(TokenType.ORDER_BY):
+                order = self._parse_order(skip_order_token=True)
+
+            pivot_expr = self.expression(
+                exp.Pivot,
+                this=this,
+                expressions=expressions,
+                using=using,
+                group=group,
+                unpivot=is_unpivot,
+                into=into,
+            )
+            
+            # 设置order参数
+            if order:
+                pivot_expr.set("order", order)
+            
+            return pivot_expr
+
+        def _parse_extract(self) -> exp.Anonymous:
+            """重写EXTRACT解析，将其降级映射为DATE_PART函数"""
+            # 解析时间部分 (YEAR, MONTH, DAY等)
+            this = self._parse_function() or self._parse_var_or_string(upper=True)
+            
+            if self._match(TokenType.FROM):
+                # 解析源表达式
+                expression = self._parse_bitwise()
+                
+                # 转换时间部分为字符串字面量
+                if isinstance(this, exp.Var):
+                    part_str = exp.Literal.string(this.this.lower())
+                elif isinstance(this, (exp.Identifier, exp.Column)):
+                    part_str = exp.Literal.string(str(this).lower())
                 else:
-                    # 常规GROUP BY表达式
-                    expr = self._parse_bitwise()
-                    if not expr:
-                        break
-                    expressions.append(expr)
-
-                if not self._match(TokenType.COMMA):
-                    break
-
-            return self.expression(exp.Group, expressions=expressions) if expressions else None
+                    part_str = this
+                
+                # 返回DATE_PART函数调用
+                return exp.Anonymous(this="DATE_PART", expressions=[part_str, expression])
+            
+            if not self._match(TokenType.COMMA):
+                self.raise_error("Expected FROM or comma after EXTRACT", self._prev)
+            
+            # 处理逗号分隔的语法 (虽然不常见)
+            expression = self._parse_bitwise()
+            
+            # 转换时间部分为字符串字面量
+            if isinstance(this, exp.Var):
+                part_str = exp.Literal.string(this.this.lower())
+            elif isinstance(this, (exp.Identifier, exp.Column)):
+                part_str = exp.Literal.string(str(this).lower())
+            else:
+                part_str = this
+                
+            return exp.Anonymous(this="DATE_PART", expressions=[part_str, expression])
 
     class Tokenizer(Postgres.Tokenizer):
         BIT_STRINGS = []
         HEX_STRINGS = []
-        BYTE_STRINGS = [("e'", "'"), ("E'", "'")]  # E前缀字符串，用于C-style转义
-        STRING_ESCAPES = ["\\", "'"]
+        BYTE_STRINGS = [("e'", "'"), ("E'", "'")]  # 小写e前缀在前，确保metaclass自动设置使用小写e
         
         # 支持炎凰SQL的Unicode字符串前缀
         UNICODE_STRINGS = [
@@ -1425,7 +654,6 @@ class Yanhuang(Postgres):
             "BLOCK": TokenType.VAR,     # SAMPLE语法中的采样方法
             "SYSTEM": TokenType.VAR,    # SAMPLE语法中的采样方法
             "UESCAPE": TokenType.VAR,   # Unicode字符串转义语法
-            "FULL": TokenType.VAR,      # SHOW FULL TABLES语法
         }
 
         # Redshift allows # to appear as a table identifier prefix
@@ -1449,10 +677,13 @@ class Yanhuang(Postgres):
         EXCEPT_INTERSECT_SUPPORT_ALL_CLAUSE = False
         SUPPORTS_MEDIAN = True
         ALTER_SET_TYPE = "TYPE"
+        SUPPORTS_UESCAPE = True  # 炎凰SQL支持UESCAPE语法
 
         # Redshift doesn't have `WITH` as part of their with_properties so we remove it
         # 炎凰SQL需要保留WITH关键字，但在properties_sql中处理
         WITH_PROPERTIES_PREFIX = ""
+        
+        # BYTE_START和BYTE_END由metaclass根据tokenizer的BYTE_STRINGS自动设置
 
         TYPE_MAPPING = {
             **Postgres.Generator.TYPE_MAPPING,
@@ -1475,11 +706,10 @@ class Yanhuang(Postgres):
             exp.Concat: lambda self, e: self.func("CONCAT", *e.expressions),
             exp.ConcatWs: concat_ws_to_dpipe_sql,
             exp.ApproxDistinct: lambda self, e: f"APPROXIMATE COUNT(DISTINCT {self.sql(e, 'this')})",
-            exp.CurrentTimestamp: lambda self, e: (
-                "SYSDATE" if e.args.get("sysdate") else "GETDATE()"
-            ),
-            exp.DateAdd: date_delta_sql("DATEADD"),
-            exp.DateDiff: date_delta_sql("DATEDIFF"),
+            exp.CurrentTimestamp: lambda self, e: self.currenttimestamp_sql(e),
+            exp.CurrentTime: lambda self, e: "CURRENT_TIME",  # 修复CURRENT_TIME不加括号
+            exp.DateAdd: lambda self, e: self.date_add_sql(e),  # 使用炎凰语法
+            exp.DateDiff: lambda self, e: self.date_diff_sql(e),  # 使用炎凰语法
             exp.Delete: lambda self, e: self.delete_sql(e),
             exp.DistKeyProperty: lambda self, e: self.func("DISTKEY", e.this),
             exp.DistStyleProperty: lambda self, e: self.naked_property(e),
@@ -1493,6 +723,7 @@ class Yanhuang(Postgres):
             exp.JSONPathSubscript: lambda self, e: self.sql(e, "this"),
             exp.Lateral: lambda self, e: self.sql(e, "this"),
             exp.Limit: lambda self, e: self.limit_sql(e, top=False),  # 炎凰SQL使用LIMIT而不是TOP
+            exp.Literal: lambda self, e: self.literal_sql(e),  # 添加字面量处理
             exp.Map: lambda self, e: f"OBJECT({self.expressions(e, flat=True)})",
             exp.Merge: lambda self, e: self.merge_sql(e),
             exp.Offset: lambda self, e: self.offset_sql(e),
@@ -1507,8 +738,8 @@ class Yanhuang(Postgres):
             exp.TableSample: lambda self, e: self.tablesample_sql(e),
             exp.ToChar: lambda self, e: self.function_fallback_sql(e),
             exp.TryCast: lambda self, e: self.cast_sql(e),
-            exp.TsOrDsAdd: lambda self, e: self.dateadd_sql(e),
-            exp.TsOrDsDiff: lambda self, e: self.datediff_sql(e),
+            exp.TsOrDsAdd: lambda self, e: self.date_add_sql(e),  # 使用炎凰语法
+            exp.TsOrDsDiff: lambda self, e: self.date_diff_sql(e),  # 使用炎凰语法
             exp.UnixToTime: lambda self, e: f"DATEADD(second, {self.sql(e, 'this')}, '1970-01-01')",
             exp.Values: lambda self, e: self.values_sql(e),
             exp.Variance: rename_func("VAR_SAMP"),
@@ -1528,7 +759,6 @@ class Yanhuang(Postgres):
             exp.GroupConcat: lambda self, e: self.func("STRING_AGG", e.this, e.args.get("separator")),
             
             # 字符串转义支持
-            exp.ByteString: lambda self, e: self.bytestring_sql(e),
             exp.UnicodeString: lambda self, e: self.unicodestring_sql(e),
             
             # 条件函数转换
@@ -1691,7 +921,6 @@ class Yanhuang(Postgres):
             "trailing",
             "true",
             "truncatecolumns",
-            "type",
             "union",
             "unique",
             "unnest",
@@ -1767,7 +996,7 @@ class Yanhuang(Postgres):
             return ""
 
         def join_sql(self, expression):
-            """处理JOIN语句，包括APPLY"""
+            """处理JOIN语句，包括APPLY，修复空格问题"""
             if isinstance(expression.this, exp.Lateral):
                 # 处理APPLY语法
                 lateral = expression.this
@@ -1788,10 +1017,61 @@ class Yanhuang(Postgres):
                 else:
                     alias_sql = ""
                 
-                return f"{join_type} {self.sql(table_func)}{alias_sql}"
+                # 修复：确保APPLY前有正确的空格
+                return f" {join_type} {self.sql(table_func)}{alias_sql}"
             else:
-                # 普通JOIN处理 - 直接使用父类方法，不添加额外空格
-                return super().join_sql(expression)
+                # 普通JOIN处理 - 重新实现以避免额外空格
+                if not self.SEMI_ANTI_JOIN_WITH_SIDE and expression.kind in ("SEMI", "ANTI"):
+                    side = None
+                else:
+                    side = expression.side
+
+                op_sql = " ".join(
+                    op
+                    for op in (
+                        expression.method,
+                        "GLOBAL" if expression.args.get("global") else None,
+                        side,
+                        expression.kind,
+                        expression.hint if self.JOIN_HINTS else None,
+                    )
+                    if op
+                )
+                
+                match_cond = self.sql(expression, "match_condition")
+                match_cond = f" MATCH_CONDITION ({match_cond})" if match_cond else ""
+                on_sql = self.sql(expression, "on")
+                using = expression.args.get("using")
+
+                if not on_sql and using:
+                    on_sql = ", ".join(self.sql(column) for column in using)
+
+                this = expression.this
+                this_sql = self.sql(this)
+
+                exprs = self.expressions(expression)
+                if exprs:
+                    this_sql = f"{this_sql}, {exprs}"
+
+                if on_sql:
+                    on_sql = self.indent(on_sql, skip_first=True)
+                    space = " " * self.pad if self.pretty else " "
+                    if using:
+                        on_sql = f" USING ({on_sql})"
+                    else:
+                        on_sql = f" ON {on_sql}"
+                elif not op_sql:
+                    if isinstance(this, exp.Lateral) and this.args.get("cross_apply") is not None:
+                        return f" {this_sql}"
+                    return f", {this_sql}"
+
+                if op_sql != "STRAIGHT_JOIN":
+                    op_sql = f"{op_sql} JOIN" if op_sql else "JOIN"
+
+                pivots = self.expressions(expression, key="pivots", sep="", flat=True)
+                
+                # 关键修复：不使用self.seg()，直接拼接避免额外空格
+                return f" {op_sql} {this_sql}{match_cond}{on_sql}{pivots}"
 
         def lateral_op(self, expression):
             cross_apply = expression.args.get("cross_apply")
@@ -1817,11 +1097,12 @@ class Yanhuang(Postgres):
             from_expr = expression.args.get("from")
             from_sql = self.sql(from_expr) if from_expr else ""
             joins = expression.args.get("joins") or []
-            joins_sql = " ".join(self.sql(join) for join in joins) if joins else ""
+            # 修复：不要在每个JOIN前添加额外空格，因为join_sql已经处理了前导空格
+            joins_sql = "".join(self.sql(join) for join in joins) if joins else ""
             if from_sql:
                 select += f" FROM {from_sql}"
             if joins_sql:
-                select += f" {joins_sql}"
+                select += joins_sql  # 修复：移除额外的空格
             # 拼接WHERE、GROUP BY、HAVING、ORDER BY、LIMIT等
             where_sql = self.sql(expression, "where").strip()
             group_sql = self.sql(expression, "group").strip()
@@ -1849,10 +1130,51 @@ class Yanhuang(Postgres):
             return select.strip()
 
         def anonymous_sql(self, expression):
+            """生成匿名函数SQL，保持表函数名原始大小写"""
             # 保持表函数名原始大小写
-            name = expression.name
-            args = self.expressions(expression, "expressions")
-            return f"{name}({args})"
+            func_name = expression.this
+            
+            # 特殊处理TIME函数的参数格式
+            if func_name == "TIME":
+                if expression.expressions:
+                    # TIME函数的已知参数名列表（这些参数即使是关键字也不应该加引号）
+                    TIME_PARAMS = {"start", "end", "column", "span", "alignment"}
+                    
+                    # 对于TIME函数，参数是key=value格式，不要在等号两边加空格
+                    args = []
+                    for expr in expression.expressions:
+                        if isinstance(expr, exp.EQ):
+                            # 处理参数名
+                            left_expr = expr.this
+                            param_name = None
+                            
+                            # 获取参数名的原始文本
+                            if isinstance(left_expr, exp.Column) and isinstance(left_expr.this, exp.Identifier):
+                                param_name = left_expr.this.this
+                            elif isinstance(left_expr, exp.Identifier):
+                                param_name = left_expr.this
+                            elif hasattr(left_expr, 'name'):
+                                param_name = left_expr.name
+                            else:
+                                param_name = str(left_expr)
+                            
+                            # 对于TIME函数的已知参数，强制不加引号
+                            if param_name and param_name.lower() in TIME_PARAMS:
+                                left = param_name  # 直接使用参数名，不加引号
+                            else:
+                                left = self.sql(left_expr)  # 其他情况使用标准生成
+                            
+                            right = self.sql(expr.expression)
+                            args.append(f"{left}={right}")
+                        else:
+                            args.append(self.sql(expr))
+                    return f"{func_name}({', '.join(args)})"
+            
+            # 其他匿名函数的标准处理
+            if expression.expressions:
+                return f"{func_name}({self.expressions(expression, flat=True)})"
+            else:
+                return f"{func_name}()"
 
         def columns_sql(self, expression: exp.Columns) -> str:
             sql = f"COLUMNS({self.sql(expression, 'this')})"
@@ -1869,6 +1191,16 @@ class Yanhuang(Postgres):
                     return self.sql(e)
                 replaces = ", ".join(tight_alias(e) for e in expression.args["replace"])
                 sql += f" REPLACE ({replaces})"
+            if expression.args.get("rename"):
+                # 处理RENAME子句，格式：RENAME (old_name AS new_name, ...)
+                def format_rename_alias(e):
+                    if isinstance(e, exp.Alias):
+                        old_name_sql = self.sql(e.this)
+                        new_name_sql = self.sql(e.alias)
+                        return f"{old_name_sql} AS {new_name_sql}"
+                    return self.sql(e)
+                renames = ", ".join(format_rename_alias(e) for e in expression.args["rename"])
+                sql += f" RENAME ({renames})"
             if expression.args.get("alias"):
                 alias = expression.args["alias"]
                 alias_sql = self.sql(alias)
@@ -1908,48 +1240,77 @@ class Yanhuang(Postgres):
             return f"EXISTS ({self.sql(expression, 'this')})"
 
         def alias_sql(self, expression: exp.Alias, alias: t.Optional[str] = None) -> str:
-            """Generate alias with appropriate AS keyword based on context"""
-            sql = self.sql(expression, "this")
-            alias = alias or self.sql(expression, "alias")
+            """
+            生成别名SQL，正确处理引号标识符
+            """
+            # 获取表达式部分
+            this_sql = self.sql(expression, "this")
+            
+            # 获取别名部分 - 从args中获取真正的Identifier对象
             if alias:
-                # 检查是否在子查询内部
-                parent = expression.parent
-                in_subquery = False
-                while parent:
-                    if isinstance(parent, exp.Subquery):
-                        in_subquery = True
-                        break
-                    parent = parent.parent
+                # 如果外部传入了别名，使用传入的别名
+                alias_sql = alias
+            else:
+                # 从args中获取真正的Identifier对象
+                alias_expr = expression.args.get("alias")
+                if not alias_expr:
+                    return this_sql
                 
-                # 如果在子查询内部，始终使用AS关键字
-                if in_subquery:
-                    return f"{sql} AS {alias}"
-                
-                # 否则检查是否有显式AS标记
-                explicit_as = expression.args.get("explicit_as", False)  # 默认为False以匹配测试期望
-                print(f"[DEBUG] alias_sql: in_subquery={in_subquery}, explicit_as={explicit_as}, expression={sql} alias={alias}")
-                if explicit_as:
-                    return f"{sql} AS {alias}"
+                # 处理别名 - 保持原有的引号状态或添加必要的引号
+                if isinstance(alias_expr, exp.Identifier):
+                    # 检查标识符是否是quoted的
+                    is_quoted = alias_expr.args.get("quoted", False)
+                    alias_name = alias_expr.this
+                    
+                    if is_quoted:
+                        # 已经明确标记为quoted，直接添加引号
+                        alias_sql = f'"{alias_name}"'
+                    elif alias_name.upper() in self.RESERVED_KEYWORDS:
+                        # 如果是保留关键字，必须添加引号
+                        alias_sql = f'"{alias_name}"'
+                    else:
+                        # 普通标识符，不添加引号
+                        alias_sql = alias_name
                 else:
-                    return f"{sql} {alias}"
-            return sql
+                    alias_sql = self.sql(alias_expr) if alias_expr else ""
+            
+            # 组合结果，AS大写，空格规范
+            if alias_sql:
+                return f"{this_sql} AS {alias_sql}"
+            return this_sql
 
         def table_sql(self, expression: exp.Table, sep: str = " AS ") -> str:
-            """Override to fix APPLY join spacing and handle table merges"""
-            # 检查是否是多表合并Union
-            if isinstance(expression.this, exp.Union) and expression.this.args.get("is_table_merge"):
-                return self.union_sql(expression.this)
-            
-            table = self.table_parts(expression)
+            """生成表名SQL，确保正确处理SAMPLE语法"""
             only = "ONLY " if expression.args.get("only") else ""
+            table = self.sql(expression, "this")
             partition = self.sql(expression, "partition")
             partition = f" {partition}" if partition else ""
             version = self.sql(expression, "version")
             version = f" {version}" if version else ""
-            alias = self.sql(expression, "alias")
-            alias = f"{sep}{alias}" if alias else ""
+            
+            # 动态确定表别名分隔符
+            alias_expr = expression.args.get("alias")
+            if alias_expr:
+                # 检查表别名是否显式使用了AS
+                alias_sql = self.sql(alias_expr)
+                explicit_as = getattr(alias_expr, 'meta', {}).get("explicit_as", False) if hasattr(alias_expr, 'meta') else False
+                
+                # 对于TableAlias，我们需要检查解析时是否有AS关键字
+                # 但由于TableAlias没有explicit_as标记，我们采用启发式方法
+                # 如果sep参数不是默认值，使用传入的sep；否则使用空格
+                if sep == " AS ":  # 默认值，说明没有特殊指定
+                    alias = f" {alias_sql}"  # 只用空格，不用AS
+                else:
+                    alias = f"{sep}{alias_sql}"  # 使用指定的分隔符
+            else:
+                alias = ""
 
+            # 修复sample处理 - 确保前面有空格
             sample = self.sql(expression, "sample")
+            # sample_sql方法已经包含前面的空格，但需要确保不丢失
+            if sample and not sample.startswith(' '):
+                sample = f" {sample}"
+
             if self.dialect.ALIAS_POST_TABLESAMPLE:
                 sample_pre_alias = sample
                 sample_post_alias = ""
@@ -2021,24 +1382,32 @@ class Yanhuang(Postgres):
             """生成PIVOT语句SQL"""
             sql = f"PIVOT {self.sql(expression.this)}"
             
-            # 处理fields参数（包含ON子句信息）
-            if expression.fields:
-                field = expression.fields[0]
-                if isinstance(field, exp.In):
-                    # 有IN子句的情况：pivot_column IN (values)
-                    pivot_column = field.this
-                    pivoted_values = field.expressions
-                    sql += f" ON {self.sql(pivot_column)}"
-                    if pivoted_values:
-                        values = ", ".join(self.sql(v) for v in pivoted_values)
-                        sql += f" IN ({values})"
-                else:
-                    # 只有透视列，没有IN子句
-                    sql += f" ON {self.sql(field)}"
+            # 炎凰SQL简化PIVOT语法处理
+            # expressions 包含 ON 子句的列
+            # using 包含 USING 子句的聚合函数
             
-            # 处理expressions参数（USING子句）
+            # 处理ON子句（从expressions获取）
             if expression.expressions:
-                using = ", ".join(self.sql(expr) for expr in expression.expressions)
+                # 炎凰SQL简化语法：expressions包含ON子句的列
+                on_columns = []
+                for expr in expression.expressions:
+                    if isinstance(expr, exp.In):
+                        # 有IN子句的情况：pivot_column IN (values)
+                        pivot_column = expr.this
+                        pivoted_values = expr.expressions
+                        on_columns.append(self.sql(pivot_column))
+                        if pivoted_values:
+                            values = ", ".join(self.sql(v) for v in pivoted_values)
+                            on_columns[-1] += f" IN ({values})"
+                    else:
+                        # 只有透视列，没有IN子句
+                        on_columns.append(self.sql(expr))
+                sql += f" ON {', '.join(on_columns)}"
+            
+            # 处理USING子句（从using参数获取）
+            if expression.args.get("using"):
+                using_exprs = expression.args["using"]
+                using = ", ".join(self.sql(expr) for expr in using_exprs)
                 sql += f" USING {using}"
             
             # 处理group参数（GROUP BY子句）
@@ -2131,10 +1500,36 @@ class Yanhuang(Postgres):
             group_items = []
             for expr in expression.expressions:
                 if isinstance(expr, exp.Anonymous) and expr.this == "TIME":
-                    # 处理TIME()语法
+                    # 处理TIME()语法 - 使用与anonymous_sql相同的逻辑
+                    # TIME函数的已知参数名列表（这些参数即使是关键字也不应该加引号）
+                    TIME_PARAMS = {"start", "end", "column", "span", "alignment"}
+                    
                     params = []
                     for param_expr in expr.expressions:
-                        if isinstance(param_expr, exp.PropertyEQ):
+                        if isinstance(param_expr, exp.EQ):
+                            # 处理参数名
+                            left_expr = param_expr.this
+                            param_name = None
+                            
+                            # 获取参数名的原始文本
+                            if isinstance(left_expr, exp.Column) and isinstance(left_expr.this, exp.Identifier):
+                                param_name = left_expr.this.this
+                            elif isinstance(left_expr, exp.Identifier):
+                                param_name = left_expr.this
+                            elif hasattr(left_expr, 'name'):
+                                param_name = left_expr.name
+                            else:
+                                param_name = str(left_expr)
+                            
+                            # 对于TIME函数的已知参数，强制不加引号
+                            if param_name and param_name.lower() in TIME_PARAMS:
+                                key = param_name  # 直接使用参数名，不加引号
+                            else:
+                                key = self.sql(left_expr)  # 其他情况使用标准生成
+                            
+                            value = self.sql(param_expr.expression)
+                            params.append(f"{key}={value}")
+                        elif isinstance(param_expr, exp.PropertyEQ):
                             # 对于PropertyEQ，直接使用this的名称，不加引号
                             if isinstance(param_expr.this, exp.Identifier):
                                 key = param_expr.this.this  # 获取标识符的原始名称
@@ -2156,97 +1551,211 @@ class Yanhuang(Postgres):
             tablesample_keyword: t.Optional[str] = None,
         ) -> str:
             """
-            生成SAMPLE语法的SQL，支持炎凰SQL的SAMPLE语法
+            生成表采样语句
+            
+            支持的语法：
+            - SAMPLE BERNOULLI (percent)
+            - SAMPLE BLOCK (percent)  
+            - SAMPLE ROW (percent)
+            - SAMPLE (percent)  - 默认为ROW方法
             """
+            # 获取采样方法和百分比
             method = expression.args.get("method")
             percent = expression.args.get("percent")
             
-            if not method or not percent:
-                return ""
-            
-            # 将method转换为炎凰SQL支持的格式
-            method_name = method.name if hasattr(method, 'name') else str(method)
-            if method_name.upper() in ("BERNOULLI", "ROW"):
-                method_name = "ROW"
-            elif method_name.upper() in ("SYSTEM", "BLOCK"):
-                method_name = "BLOCK"
+            # 处理采样方法
+            if method:
+                method_name = method.name if hasattr(method, 'name') else str(method)
+                if method_name == "BERNOULLI":
+                    method_sql = "BERNOULLI"
+                elif method_name == "BLOCK":
+                    method_sql = "BLOCK"
+                elif method_name == "ROW":
+                    method_sql = "ROW"
+                else:
+                    method_sql = str(method)
             else:
-                method_name = "ROW"  # 默认使用ROW
+                method_sql = "ROW"  # 默认方法
             
-            percent_value = self.sql(percent)
-            return f" SAMPLE {method_name} ({percent_value})"
-
-        def bytestring_sql(self, expression: exp.ByteString) -> str:
-            """
-            生成E前缀字符串的SQL，用于C-style转义字符
-            """
-            string_value = expression.this
-            # 转义字符串中的特殊字符
-            escaped_string = self.escape_str(string_value)
-            return f"E'{escaped_string}'"
+            percent_sql = self.sql(percent) if percent else "1.0"
+            
+            return f"SAMPLE {method_sql} ({percent_sql})"
 
         def unicodestring_sql(self, expression: exp.UnicodeString) -> str:
-            """生成Unicode字符串SQL，修复基类的regex错误"""
+            """生成Unicode字符串SQL，保持原始转义格式"""
             value = expression.this
             escape_char = expression.args.get("escape")
             
-            # 生成 U&'value' 或 U&'value' UESCAPE 'char' 格式
             if escape_char:
-                # 获取转义字符的值
-                if hasattr(escape_char, 'this'):
-                    escape_value = escape_char.this
-                elif hasattr(escape_char, 'name'):
-                    escape_value = escape_char.name
-                else:
-                    escape_value = str(escape_char)
-                return f"U&'{value}' UESCAPE '{escape_value}'"
+                return f"U&'{value}' UESCAPE '{escape_char}'"
             else:
                 return f"U&'{value}'"
                 
         def show_sql(self, expression: exp.Show) -> str:
             """生成SHOW语句SQL"""
-            target = expression.this
-            full = expression.args.get("full")
-            where = expression.args.get("where")
-            
             parts = ["SHOW"]
             
-            if full:
-                parts.append("FULL")
-                
-            if isinstance(target, str):
-                parts.append(target)
-            else:
-                parts.append(self.sql(target))
-                
+            # 处理this参数（SHOW的目标，如TABLES）
+            target = expression.this
+            if target:
+                if isinstance(target, exp.Literal):
+                    parts.append(target.this)
+                elif isinstance(target, exp.Var):
+                    parts.append(target.this)
+                else:
+                    parts.append(self.sql(target))
+            
+            # 处理FROM子句
+            from_table = expression.args.get("from")
+            if from_table:
+                parts.append("FROM")
+                parts.append(self.sql(from_table))
+            
+            # 处理WHERE子句
+            where = expression.args.get("where")
             if where:
-                parts.append(f"WHERE {self.sql(where)}")
+                parts.append("WHERE")
+                parts.append(self.sql(where))
                 
             return " ".join(parts)
 
         def properties_sql(self, expression: exp.Properties) -> str:
-            """生成Properties SQL，为炎凰SQL添加WITH关键字"""
-            if not expression or not expression.expressions:
+            """生成属性SQL，支持炎凰SQL的ENGINE和WITH语法"""
+            if not expression.expressions:
                 return ""
             
             props = []
+            with_props = []
+            
             for prop in expression.expressions:
                 if isinstance(prop, exp.EngineProperty):
-                    # ENGINE属性不在括号内
                     props.append(f"ENGINE={self.sql(prop.this)}")
                 else:
-                    # 其他属性在WITH括号内
-                    prop_sql = self.sql(prop)
-                    props.append(prop_sql)
+                    # 其他属性作为WITH子句的一部分
+                    prop_name = self.sql(prop.this)
+                    
+                    # 正确的方式：通过args字典获取value参数
+                    prop_value_expr = prop.args.get("value")
+                    
+                    if prop_value_expr is not None:
+                        prop_value = self.sql(prop_value_expr)
+                        with_props.append(f"{prop_name}={prop_value}")
+                    else:
+                        with_props.append(prop_name)
             
-            # 分离ENGINE和其他属性
-            engine_props = [p for p in props if p.startswith("ENGINE=")]
-            other_props = [p for p in props if not p.startswith("ENGINE=")]
+            result_parts = []
+            if props:
+                result_parts.extend(props)
             
-            result = ""
-            if engine_props:
-                result += " ".join(engine_props)
-            if other_props:
-                result += f" WITH ({', '.join(other_props)})"
-                
-            return result
+            if with_props:
+                with_clause = f"WITH ({', '.join(with_props)})"
+                result_parts.append(with_clause)
+            
+            return " ".join(result_parts) if result_parts else ""
+        
+        def currenttimestamp_sql(self, expression: exp.CurrentTimestamp) -> str:
+            """生成CURRENT_TIMESTAMP SQL
+            
+            如果表达式在meta中存储了原始函数名，使用原始名称；
+            否则使用CURRENT_TIMESTAMP
+            """
+            original_func = expression.meta.get("original_func")
+            if original_func == "NOW":
+                return "NOW()"
+            return "CURRENT_TIMESTAMP"
+
+        def date_add_sql(self, expression: exp.DateAdd | exp.TsOrDsAdd) -> str:
+            """生成炎凰数据的DATE_ADD函数SQL
+            
+            炎凰数据的DATE_ADD语法：
+            - DATE_ADD(<time_unit>, <delta>) - 基于当前系统时间
+            - DATE_ADD(<time_unit>, <delta>, <base_timestamp>) - 基于指定时间戳
+            
+            参数顺序与标准SQL不同：time_unit在前，delta在中间，base_timestamp在最后
+            """
+            # 从表达式中提取参数
+            if isinstance(expression, exp.DateAdd):
+                # DateAdd(this=base, expression=delta, unit=unit)
+                base = expression.this
+                delta = expression.expression
+                unit = expression.args.get("unit")
+            else:  # TsOrDsAdd
+                # TsOrDsAdd(this=base, expression=delta, unit=unit)
+                base = expression.this
+                delta = expression.expression
+                unit = expression.args.get("unit")
+            
+            # 处理时间单位
+            if unit:
+                unit_str = unit.name.lower() if hasattr(unit, 'name') else str(unit).lower()
+                # 将完整单位名转换为炎凰数据的简写形式
+                unit_mapping = {
+                    'day': 'd', 'days': 'd',
+                    'hour': 'h', 'hours': 'h', 
+                    'minute': 'm', 'minutes': 'm',
+                    'second': 's', 'seconds': 's',
+                    'month': 'M', 'months': 'M',
+                    'year': 'y', 'years': 'y'
+                }
+                unit_str = unit_mapping.get(unit_str, unit_str)
+            else:
+                unit_str = 'd'  # 默认为天
+            
+            # 生成SQL
+            if base:
+                # 三参数形式：DATE_ADD(<time_unit>, <delta>, <base_timestamp>)
+                return self.func("DATE_ADD", f"'{unit_str}'", delta, base)
+            else:
+                # 二参数形式：DATE_ADD(<time_unit>, <delta>)
+                return self.func("DATE_ADD", f"'{unit_str}'", delta)
+
+        def date_diff_sql(self, expression: exp.DateDiff | exp.TsOrDsDiff) -> str:
+            """生成炎凰数据的DATE_DIFF函数SQL
+            
+            炎凰数据的DATE_DIFF语法：
+            DATE_DIFF(<time_unit>, <start_timestamp>, <end_timestamp>)
+            计算 end_timestamp - start_timestamp
+            """
+            # 从表达式中提取参数
+            if isinstance(expression, exp.DateDiff):
+                # DateDiff(this=end, expression=start, unit=unit)
+                end = expression.this
+                start = expression.expression
+                unit = expression.args.get("unit")
+            else:  # TsOrDsDiff
+                # TsOrDsDiff(this=end, expression=start, unit=unit)
+                end = expression.this
+                start = expression.expression
+                unit = expression.args.get("unit")
+            
+            # 处理时间单位
+            if unit:
+                unit_str = unit.name.lower() if hasattr(unit, 'name') else str(unit).lower()
+                # 将完整单位名转换为炎凰数据的简写形式
+                unit_mapping = {
+                    'day': 'd', 'days': 'd',
+                    'hour': 'h', 'hours': 'h', 
+                    'minute': 'm', 'minutes': 'm',
+                    'second': 's', 'seconds': 's',
+                    'month': 'M', 'months': 'M',
+                    'year': 'y', 'years': 'y'
+                }
+                unit_str = unit_mapping.get(unit_str, unit_str)
+            else:
+                unit_str = 'd'  # 默认为天
+            
+            # 生成SQL：DATE_DIFF(<time_unit>, <start_timestamp>, <end_timestamp>)
+            return self.func("DATE_DIFF", f"'{unit_str}'", start, end)
+
+        def literal_sql(self, expression: exp.Literal) -> str:
+            """处理字面量的SQL生成，特别是字符串转义"""
+            if expression.is_string:
+                value = expression.this
+                # 使用双引号转义方式处理单引号
+                escaped_value = value.replace("'", "''")
+                return f"'{escaped_value}'"
+            else:
+                # 对于非字符串字面量，使用父类处理
+                return super().literal_sql(expression)
+
+            return text

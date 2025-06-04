@@ -1,0 +1,435 @@
+# SQLGlot 开发最佳实践规则
+# =======================================
+# 这些规则用于指导SQLGlot及其方言开发中的最佳实践
+
+## 核心原则
+- 始终优先考虑与SQLGlot核心的兼容性
+- 避免修改SQLGlot核心类的基础行为（如__deepcopy__）
+- 使用SQLGlot提供的标准机制来扩展功能
+
+## 元数据存储最佳实践
+
+### 使用 meta 字典存储扩展元数据
+当需要在表达式节点上存储额外的元数据时，使用`meta`字典而不是动态属性：
+
+```python
+# ✅ 推荐：使用 meta 字典
+expression.meta["original_func"] = "NOW"
+original = expression.meta.get("original_func")
+
+# ❌ 避免：直接添加属性
+expression._original_func = "NOW"  # 深拷贝时可能丢失
+```
+
+### meta 字典的优势
+1. **深拷贝安全**：`__deepcopy__`方法已正确处理`_meta`属性
+2. **类型安全**：不会干扰SQLGlot的类型系统
+3. **可序列化**：支持序列化和反序列化
+4. **命名空间清晰**：避免与SQLGlot内部属性冲突
+
+### 方言开发中的meta使用模式
+
+#### 模式1：函数转换元数据
+```python
+class YanhuangGenerator(PostgresGenerator):
+    def currenttimestamp_sql(self, expression: exp.CurrentTimestamp) -> str:
+        # 检查是否有原始函数信息
+        original_func = expression.meta.get("original_func")
+        if original_func == "NOW":
+            return "NOW()"
+        return "CURRENT_TIMESTAMP"
+```
+
+#### 模式2：解析时存储原始信息
+```python
+class YanhuangParser(PostgresParser):
+    def _parse_function(self, functions=None, anonymous=False, optional_parens=True):
+        # 解析函数
+        func = super()._parse_function(functions, anonymous, optional_parens)
+        
+        # 存储原始函数名到meta
+        if isinstance(func, exp.CurrentTimestamp) and self._prev.type == TokenType.VAR:
+            func.meta["original_func"] = self._prev.text.upper()
+        
+        return func
+```
+
+#### 模式3：条件转换逻辑
+```python
+# 在转换过程中保持元数据
+def transform_function(node):
+    if isinstance(node, exp.Anonymous) and node.this == "NOW":
+        current_ts = exp.CurrentTimestamp()
+        # 保存原始函数信息
+        current_ts.meta["original_func"] = "NOW"
+        # 保持其他可能存在的元数据
+        if node.meta:
+            current_ts.meta.update(node.meta)
+        return current_ts
+    return node
+```
+
+## 测试最佳实践
+
+### meta 功能测试
+```python
+def test_meta_preservation():
+    """测试meta字典在深拷贝中的保持"""
+    original = exp.CurrentTimestamp()
+    original.meta["original_func"] = "NOW"
+    
+    # 深拷贝测试
+    copied = original.copy()
+    assert copied.meta.get("original_func") == "NOW"
+    
+    # transform测试
+    transformed = original.transform(lambda x: x, copy=True)
+    assert transformed.meta.get("original_func") == "NOW"
+```
+
+## 常见陷阱和解决方案
+
+### 陷阱1：动态属性在深拷贝中丢失
+```python
+# ❌ 问题代码
+func._custom_attr = "value"
+copied_func = func.copy()  # _custom_attr 丢失
+
+# ✅ 解决方案
+func.meta["custom_attr"] = "value"
+copied_func = func.copy()  # meta["custom_attr"] 保持
+```
+
+### 陷阱2：修改核心类的__deepcopy__方法
+```python
+# ❌ 避免修改核心方法
+class Expression:
+    def __deepcopy__(self, memo):
+        # 不要在这里添加自定义逻辑
+        pass
+
+# ✅ 使用标准的meta机制
+expression.meta["custom_data"] = data
+```
+
+### 陷阱3：meta键名冲突
+```python
+# ❌ 可能冲突的键名
+expression.meta["type"] = "custom"  # 可能与内部使用冲突
+
+# ✅ 使用命名空间前缀
+expression.meta["yanhuang:original_func"] = "NOW"
+expression.meta["dialect:custom_info"] = data
+```
+
+## 方言开发检查清单
+
+### 开发新功能时的检查项：
+- [ ] 是否需要存储额外元数据？
+- [ ] 是否使用了meta字典而不是动态属性？
+- [ ] 是否在深拷贝后测试了元数据保持？
+- [ ] 是否使用了合适的meta键名（避免冲突）？
+- [ ] 是否编写了相应的测试用例？
+
+### 调试问题时的检查项：
+- [ ] 属性是否在深拷贝中丢失？→ 考虑使用meta
+- [ ] 转换过程中信息是否丢失？→ 检查meta传递
+- [ ] 是否出现键名冲突？→ 使用命名空间前缀
+
+## 性能考虑
+
+### meta 字典的性能特性
+- meta字典只在需要时创建（延迟初始化）
+- 深拷贝时只有非空meta会被复制
+- 内存开销最小化
+
+### 最佳实践
+```python
+# ✅ 高效的meta使用
+if expression.meta.get("needs_special_handling"):
+    # 只在需要时访问
+
+# ✅ 批量设置
+expression.meta.update({
+    "original_func": "NOW",
+    "dialect": "yanhuang",
+    "custom_flag": True
+})
+```
+
+## 文档和维护
+
+### 代码注释规范
+```python
+def parse_timestamp_function(self):
+    """解析时间戳函数
+    
+    使用meta字典存储原始函数名，确保在后续转换中
+    能够正确生成目标SQL。
+    
+    Meta键：
+    - "original_func": 原始函数名（如"NOW", "CURRENT_TIMESTAMP"）
+    """
+    pass
+```
+
+### 变更日志记录
+当修改meta使用模式时，在变更日志中记录：
+- 新增的meta键及其用途
+- 移除的meta键（向后兼容性）
+- 相关的迁移指南
+
+## 实际案例分析
+
+### 案例1：时间戳函数转换问题
+**问题背景**：CurrentTimestamp函数在Yanhuang方言中需要根据原始函数名选择不同的输出格式
+- `NOW()` → `NOW()`  
+- `CURRENT_TIMESTAMP` → `CURRENT_TIMESTAMP`
+
+**错误方案**：
+```python
+# ❌ 使用动态属性（在深拷贝时丢失）
+current_ts._original_func = "NOW"
+```
+
+**正确方案**：
+```python
+# ✅ 使用meta字典存储元数据
+current_ts.meta["original_func"] = "NOW"
+
+# 在生成器中检查
+def currenttimestamp_sql(self, expression):
+    if expression.meta.get("original_func") == "NOW":
+        return "NOW()"
+    return "CURRENT_TIMESTAMP"
+```
+
+### 案例2：复杂表达式的COLUMNS函数
+**场景**：需要在COLUMNS函数中添加RENAME子句处理
+
+**最佳实践**：
+```python
+# 存储RENAME相关元数据
+columns_expr.meta.update({
+    "has_rename": True,
+    "rename_mapping": {"old_col": "new_col"},
+    "original_pattern": "^f[1-4]$"
+})
+
+# 在生成器中使用
+def columns_sql(self, expression):
+    sql = f"COLUMNS({expression.this})"
+    
+    if expression.meta.get("has_rename"):
+        rename_mapping = expression.meta.get("rename_mapping", {})
+        if rename_mapping:
+            rename_clauses = [f"{old} AS {new}" for old, new in rename_mapping.items()]
+            sql += f" RENAME ({', '.join(rename_clauses)})"
+    
+    return sql
+```
+
+## 调试工具和技巧
+
+### meta调试助手
+```python
+def debug_expression_meta(expr, name=""):
+    """调试表达式的meta信息"""
+    print(f"=== {name or type(expr).__name__} Meta Debug ===")
+    if hasattr(expr, '_meta') and expr._meta:
+        for key, value in expr._meta.items():
+            print(f"  {key}: {value}")
+    else:
+        print("  No meta data")
+    print()
+
+# 使用示例
+debug_expression_meta(current_ts, "CurrentTimestamp")
+```
+
+### transform过程中的meta跟踪
+```python
+def tracked_transform(expression, func, **kwargs):
+    """带meta跟踪的transform"""
+    def tracking_func(node):
+        print(f"Transform: {type(node).__name__}")
+        if hasattr(node, '_meta') and node._meta:
+            print(f"  Meta: {node._meta}")
+        result = func(node)
+        if result != node and hasattr(result, '_meta') and result._meta:
+            print(f"  Result Meta: {result._meta}")
+        return result
+    
+    return expression.transform(tracking_func, **kwargs)
+```
+
+## 版本兼容性
+
+### SQLGlot版本差异处理
+```python
+# 检查SQLGlot版本以确保meta支持
+try:
+    expr = exp.CurrentTimestamp()
+    expr.meta["test"] = "value"
+    assert expr.meta["test"] == "value"
+except (AttributeError, KeyError):
+    # 降级处理或抛出兼容性错误
+    raise RuntimeError("SQLGlot版本不支持meta字典功能")
+```
+
+### 向后兼容性保证
+```python
+def get_original_func(expression):
+    """向后兼容的元数据获取"""
+    # 新版本：使用meta
+    if hasattr(expression, 'meta'):
+        return expression.meta.get("original_func")
+    
+    # 旧版本：使用动态属性（如果存在）
+    return getattr(expression, '_original_func', None)
+```
+
+## 团队协作规范
+
+### Code Review检查项
+在进行代码审查时，重点检查：
+- [ ] 是否正确使用了meta字典
+- [ ] meta键名是否有命名空间前缀
+- [ ] 是否有相应的测试用例
+- [ ] 文档是否记录了新的meta键用途
+
+### 提交信息规范
+```
+feat: 添加时间戳函数原始名称保持功能
+
+使用expression.meta["original_func"]存储原始函数名，
+确保在深拷贝和转换过程中信息不丢失。
+
+Meta键:
+- "original_func": 存储原始函数名(NOW/CURRENT_TIMESTAMP)
+
+Fixes: #123
+```
+
+---
+
+*这些规则基于SQLGlot炎凰方言开发中的实际经验总结，特别是时间戳函数转换问题的解决过程。持续更新以反映最新的最佳实践。*
+
+# SQLGlot 炎凰方言开发规则
+
+## 核心原则
+- 与PostgreSQL保持最大兼容性
+- 一样的语法和功能复用即可，不需要自己重写
+- 特色的差异部分才自定义实现
+- 继承优于重写
+
+## 代码开发规则
+
+### Tokenizer 开发规则
+- 继承 `Postgres.Tokenizer`
+- 只修改必要的配置差异，如：
+  - `BYTE_STRINGS` 顺序调整
+  - 新增炎凰特有的字符串类型
+- 禁止重新定义核心配置如 `STRING_ESCAPES`，除非确实需要
+
+### Generator 开发规则
+- 继承 `Postgres.Generator`
+- 只实现炎凰SQL特有的功能
+- 禁止重写PostgreSQL已有的正确实现
+- 禁止在 `TRANSFORMS` 中重新映射已正确工作的表达式
+
+### Parser 开发规则
+- 继承 `Postgres.Parser`
+- 只添加炎凰特有的函数和语法解析
+- 复用PostgreSQL的标准解析逻辑
+
+## 具体实践规则
+
+### ✅ 推荐的代码模式
+
+```python
+# 最小差异化配置
+class Tokenizer(Postgres.Tokenizer):
+    BYTE_STRINGS = [("e'", "'"), ("E'", "'")]  # 只调整顺序
+    # 不重新定义 STRING_ESCAPES
+
+# 只添加特有功能
+class Generator(Postgres.Generator):
+    def yanhuang_specific_sql(self, expression):
+        # 只实现炎凰特有功能
+        pass
+```
+
+### ❌ 禁止的代码模式
+
+```python
+# 不要重复实现已有功能
+class Generator(Postgres.Generator):
+    def bytestring_sql(self, expression):  # ❌ PostgreSQL已有实现
+        pass
+    
+    TRANSFORMS = {
+        **Postgres.Generator.TRANSFORMS,
+        exp.ByteString: lambda self, e: self.bytestring_sql(e),  # ❌ 不必要映射
+    }
+
+# 不要改变核心配置
+class Tokenizer(Postgres.Tokenizer):
+    STRING_ESCAPES = ["\\", "'"]  # ❌ 改变转义规则
+```
+
+## 开发流程
+
+### 新功能开发前检查
+1. PostgreSQL是否已有相同功能？
+2. 炎凰SQL的差异点在哪里？
+3. 是否只需要配置调整？
+4. 是否需要重写现有方法？
+
+### 实现策略选择
+- **完全相同** → 直接继承
+- **配置差异** → 最小配置调整
+- **语法扩展** → 添加新解析器
+- **行为差异** → 重写特定方法
+
+### 测试要求
+- 必须与PostgreSQL进行对比测试
+- 验证语义一致性
+- 确保向后兼容性
+
+## 代码审查要求
+
+### 必须检查项
+- [ ] 是否有重复的PostgreSQL实现？
+- [ ] 是否有不必要的配置重定义？
+- [ ] 是否保持了语义兼容性？
+- [ ] 是否有完整的测试覆盖？
+
+### 性能考虑
+- [ ] 是否充分利用了继承机制？
+- [ ] 是否引入了不必要的复杂逻辑？
+- [ ] 是否有性能回归？
+
+## 常见陷阱提醒
+
+### 配置陷阱
+- 不要随意改变 `STRING_ESCAPES`
+- 不要重新定义 `TRANSFORMS` 中已正确工作的映射
+- 注意 metaclass 自动配置的影响
+
+### 继承陷阱
+- 重写方法时考虑是否需要调用 `super()`
+- 不要忽略父类的正确实现
+- 避免重复实现已有功能
+
+## 文档要求
+- 新增功能必须说明与PostgreSQL的差异
+- 重写方法必须说明原因和影响
+- 配置修改必须说明目的和效果
+
+## 示例参考
+参考字节字符串处理的最佳实践：
+- 只调整 `BYTE_STRINGS` 顺序实现小写e'优先
+- 删除不必要的 `STRING_ESCAPES` 重定义
+- 删除重复的 `bytestring_sql` 实现
+- 保持与PostgreSQL的完全兼容性 
