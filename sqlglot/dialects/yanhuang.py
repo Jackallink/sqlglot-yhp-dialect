@@ -25,15 +25,31 @@ if t.TYPE_CHECKING:
 
 def _build_date_delta(expr_type: t.Type[E]) -> t.Callable[[t.List], E]:
     def _builder(args: t.List) -> E:
-        expr = expr_type(
-            this=seq_get(args, 2),
-            expression=seq_get(args, 1),
-            unit=map_date_part(seq_get(args, 0)),
-        )
-        if expr_type is exp.TsOrDsAdd:
-            expr.set("return_type", exp.DataType.build("TIMESTAMP"))
-
-        return expr
+        # 炎凰SQL的DATE_ADD支持两种形式：
+        # DATE_ADD(<time_unit>, <delta>) - 基于当前时间
+        # DATE_ADD(<time_unit>, <delta>, <base_timestamp>) - 基于指定时间
+        
+        if len(args) == 2:
+            # 两参数形式：DATE_ADD('day', 7) - 基于当前时间
+            # 使用Anonymous表达式保持原始函数调用
+            unit = seq_get(args, 0)
+            delta = seq_get(args, 1)
+            func_name = "DATE_ADD" if expr_type is exp.TsOrDsAdd else "DATE_DIFF"
+            return exp.Anonymous(this=func_name, expressions=[unit, delta])
+        elif len(args) == 3:
+            # 三参数形式：DATE_ADD('day', 7, date_col) - 基于指定时间
+            expr = expr_type(
+                this=seq_get(args, 2),
+                expression=seq_get(args, 1),
+                unit=map_date_part(seq_get(args, 0)),
+            )
+            if expr_type is exp.TsOrDsAdd:
+                expr.set("return_type", exp.DataType.build("TIMESTAMP"))
+            return expr
+        else:
+            # 参数数量不正确，返回Anonymous表达式
+            func_name = "DATE_ADD" if expr_type is exp.TsOrDsAdd else "DATE_DIFF"
+            return exp.Anonymous(this=func_name, expressions=args)
 
     return _builder
 
@@ -87,6 +103,36 @@ def _add_months_to_dateadd(args: t.List) -> exp.TsOrDsAdd:
     )
 
 
+def _unnest_to_flatten(args: t.List) -> exp.Anonymous:
+    """将UNNEST函数降级映射为FLATTEN函数
+    
+    UNNEST(array) -> FLATTEN(array)
+    """
+    return exp.Anonymous(this="FLATTEN", expressions=args)
+
+
+def _addmonths_to_date_add(args: t.List) -> exp.Anonymous:
+    """将ADDMONTHS函数降级映射为DATE_ADD函数
+    
+    ADDMONTHS(date_col, 3) -> DATE_ADD('month', 3, date_col)
+    """
+    if len(args) != 2:
+        # 如果参数不正确，返回原始调用
+        return exp.Anonymous(this="ADDMONTHS", expressions=args)
+    
+    date_expr, months_expr = args
+    
+    # 创建DATE_ADD函数：DATE_ADD('month', months, date)
+    return exp.Anonymous(
+        this="DATE_ADD", 
+        expressions=[
+            exp.Literal.string("month"),
+            months_expr,
+            date_expr
+        ]
+    )
+
+
 class Yanhuang(Postgres):
     """
     炎凰SQL方言，继承自Postgres。
@@ -113,7 +159,9 @@ class Yanhuang(Postgres):
             **Postgres.Parser.FUNCTIONS,
             # 添加降级映射：不支持的函数映射到支持的等价函数
             "EXTRACT": _extract_to_date_part,  # EXTRACT降级映射为DATE_PART
-            "ADD_MONTHS": _add_months_to_dateadd,  # ADD_MONTHS降级映射为DATEADD
+            "UNNEST": _unnest_to_flatten,  # UNNEST降级映射为FLATTEN
+            "ADDMONTHS": _addmonths_to_date_add,  # ADDMONTHS降级映射为DATE_ADD
+            "ADD_MONTHS": _addmonths_to_date_add,  # ADD_MONTHS别名也映射为DATE_ADD
             "CONVERT_TIMEZONE": lambda args: build_convert_timezone(args, "UTC"),
             "DATEADD": _build_date_delta(exp.TsOrDsAdd),
             "DATE_ADD": _build_date_delta(exp.TsOrDsAdd),
@@ -279,7 +327,7 @@ class Yanhuang(Postgres):
             "EXPLODE_OUTER": lambda args: exp.Anonymous(this="EXPLODE_OUTER", expressions=args),
             "POSEXPLODE": lambda args: exp.Anonymous(this="POSEXPLODE", expressions=args),
             "POSEXPLODE_OUTER": lambda args: exp.Anonymous(this="POSEXPLODE_OUTER", expressions=args),
-            "UNNEST": lambda args: exp.Anonymous(this="UNNEST", expressions=args),
+            "UNNEST": _unnest_to_flatten,  # 修改为使用正确的映射函数
             
             # JSON函数支持
             "JSON_EXTRACT": lambda args: exp.Anonymous(this="JSON_EXTRACT", expressions=args),
@@ -707,6 +755,7 @@ class Yanhuang(Postgres):
             exp.ConcatWs: concat_ws_to_dpipe_sql,
             exp.ApproxDistinct: lambda self, e: f"APPROXIMATE COUNT(DISTINCT {self.sql(e, 'this')})",
             exp.CurrentTimestamp: lambda self, e: self.currenttimestamp_sql(e),
+            exp.CurrentDate: lambda self, e: "DATE_TRUNC('day', NOW())",  # 炎凰SQL不支持CURRENT_DATE
             exp.CurrentTime: lambda self, e: "CURRENT_TIME",  # 修复CURRENT_TIME不加括号
             exp.DateAdd: lambda self, e: self.date_add_sql(e),  # 使用炎凰语法
             exp.DateDiff: lambda self, e: self.date_diff_sql(e),  # 使用炎凰语法
@@ -1656,13 +1705,10 @@ class Yanhuang(Postgres):
         def currenttimestamp_sql(self, expression: exp.CurrentTimestamp) -> str:
             """生成CURRENT_TIMESTAMP SQL
             
-            如果表达式在meta中存储了原始函数名，使用原始名称；
-            否则使用CURRENT_TIMESTAMP
+            炎凰SQL不支持CURRENT_TIMESTAMP，统一转换为NOW()函数
             """
-            original_func = expression.meta.get("original_func")
-            if original_func == "NOW":
-                return "NOW()"
-            return "CURRENT_TIMESTAMP"
+            # 炎凰SQL不支持CURRENT_TIMESTAMP，统一使用NOW()
+            return "NOW()"
 
         def date_add_sql(self, expression: exp.DateAdd | exp.TsOrDsAdd) -> str:
             """生成炎凰数据的DATE_ADD函数SQL
