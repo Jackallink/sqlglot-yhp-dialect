@@ -78,7 +78,6 @@ class Yanhuang(Postgres):
             ),
             "STRTOL": exp.FromBase.from_arg_list,
             "CAST": exp.Cast.from_arg_list,
-            "CONCAT": exp.Concat.from_arg_list,
             "CONTAINS": lambda args: exp.Anonymous(this="CONTAINS", expressions=args),
             
             # 字符串函数补充
@@ -102,7 +101,7 @@ class Yanhuang(Postgres):
             "SQRT": lambda args: exp.Sqrt.from_arg_list(args),
             "POWER": lambda args: exp.Pow.from_arg_list(args),
             "POW": lambda args: exp.Pow.from_arg_list(args),
-            "MOD": lambda args: exp.Mod.from_arg_list(args),
+            "MOD": lambda args: exp.Anonymous(this="MOD", expressions=args),
             "SIN": lambda args: exp.Anonymous(this="SIN", expressions=args),
             "COS": lambda args: exp.Anonymous(this="COS", expressions=args),
             "TAN": lambda args: exp.Anonymous(this="TAN", expressions=args),
@@ -1123,7 +1122,7 @@ class Yanhuang(Postgres):
         TRANSFORMS = {
             **Postgres.Generator.TRANSFORMS,
             exp.ArrayConcat: lambda self, e: self.arrayconcat_sql(e, name="ARRAY_CONCAT"),
-            exp.Concat: concat_to_dpipe_sql,
+            exp.Concat: lambda self, e: self.func("CONCAT", *e.expressions),
             exp.ConcatWs: concat_ws_to_dpipe_sql,
             exp.ApproxDistinct: lambda self, e: f"APPROXIMATE COUNT(DISTINCT {self.sql(e, 'this')})",
             exp.CurrentTimestamp: lambda self, e: (
@@ -1169,7 +1168,7 @@ class Yanhuang(Postgres):
             
             # 表函数转换
             exp.ExplodingGenerateSeries: lambda self, e: self.func("GENERATE_SERIES", e.args.get("start"), e.args.get("end"), e.args.get("step")) if e.args.get("step") else self.func("GENERATE_SERIES", e.args.get("start"), e.args.get("end")),
-            exp.Unnest: lambda self, e: self.func("UNNEST", e.this),
+            exp.Unnest: lambda self, e: self.func("UNNEST", *e.expressions) if e.expressions else self.func("UNNEST"),
             
             # 字符串函数转换
             exp.Substring: lambda self, e: self.func("SUBSTRING", e.this, e.args.get("start"), e.args.get("length")) if e.args.get("length") else self.func("SUBSTRING", e.this, e.args.get("start")),
