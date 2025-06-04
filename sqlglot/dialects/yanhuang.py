@@ -506,10 +506,16 @@ class Yanhuang(Postgres):
                     statement = self._check_window_function_restrictions(statement)
                     statement = self._check_tablesample_limitations(statement)
                     statement = self._check_distinct_limitations(statement)
+                    statement = self._check_complex_types(statement)
                 elif isinstance(statement, exp.Delete):
                     statement = self._check_delete_limitations(statement)
+                    statement = self._check_complex_types(statement)
                 elif isinstance(statement, exp.Create):
                     statement = self._check_table_ddl_limitations(statement)
+                    statement = self._check_complex_types(statement)
+                else:
+                    # 对其他类型的语句也检查复杂类型
+                    statement = self._check_complex_types(statement)
                 
                 return statement
             except AttributeError as e:
@@ -867,21 +873,82 @@ class Yanhuang(Postgres):
             def check_node(node):
                 if isinstance(node, exp.Create) and node.args.get("kind") == "TABLE":
                     # 检查schema中的约束
-                    schema = node.args.get("schema")
-                    if schema and hasattr(schema, 'expressions'):
+                    schema = node.args.get("this")  # schema在this字段中
+                    if schema and isinstance(schema, exp.Schema) and hasattr(schema, 'expressions'):
                         for expr in schema.expressions:
                             if isinstance(expr, exp.ColumnDef):
-                                # 检查PRIMARY KEY约束
+                                # 检查列级约束
                                 constraints = expr.args.get("constraints", [])
                                 for constraint in constraints:
-                                    if isinstance(constraint, exp.PrimaryKeyColumnConstraint):
+                                    if isinstance(constraint, exp.ColumnConstraint):
+                                        kind = constraint.args.get("kind")
+                                        if isinstance(kind, exp.PrimaryKeyColumnConstraint):
+                                            self.raise_error("PRIMARY KEY constraints are not supported in Yanhuang SQL")
+                                        elif isinstance(kind, exp.Reference):
+                                            self.raise_error("FOREIGN KEY constraints are not supported in Yanhuang SQL")
+                                        elif isinstance(kind, exp.UniqueColumnConstraint):
+                                            self.raise_error("UNIQUE constraints are not supported in Yanhuang SQL")
+                                        elif isinstance(kind, exp.CheckColumnConstraint):
+                                            self.raise_error("CHECK constraints are not supported in Yanhuang SQL")
+                                    # 直接的约束类型（不在ColumnConstraint包装中）
+                                    elif isinstance(constraint, exp.PrimaryKeyColumnConstraint):
                                         self.raise_error("PRIMARY KEY constraints are not supported in Yanhuang SQL")
-                                    if isinstance(constraint, exp.ForeignKeyColumnConstraint):
+                                    elif isinstance(constraint, exp.Reference):
                                         self.raise_error("FOREIGN KEY constraints are not supported in Yanhuang SQL")
+                                    elif isinstance(constraint, exp.UniqueColumnConstraint):
+                                        self.raise_error("UNIQUE constraints are not supported in Yanhuang SQL")
+                                    elif isinstance(constraint, exp.CheckColumnConstraint):
+                                        self.raise_error("CHECK constraints are not supported in Yanhuang SQL")
+                            # 表级约束
                             elif isinstance(expr, exp.PrimaryKey):
                                 self.raise_error("PRIMARY KEY constraints are not supported in Yanhuang SQL")
                             elif isinstance(expr, exp.ForeignKey):
                                 self.raise_error("FOREIGN KEY constraints are not supported in Yanhuang SQL")
+                            elif isinstance(expr, exp.Unique):
+                                self.raise_error("UNIQUE constraints are not supported in Yanhuang SQL")
+                            elif isinstance(expr, exp.Check):
+                                self.raise_error("CHECK constraints are not supported in Yanhuang SQL")
+                
+                return node
+            
+            return statement.transform(check_node)
+
+        def _check_complex_types(self, statement):
+            """检查复杂类型使用限制"""
+            if statement is None:
+                return None
+                
+            def check_node(node):
+                # 检查ARRAY类型和字面量
+                if isinstance(node, exp.Array):
+                    self.raise_error("ARRAY types are not supported in Yanhuang SQL")
+                elif isinstance(node, exp.DataType):
+                    # 检查数据类型
+                    type_name = node.this
+                    if isinstance(type_name, exp.DataType.Type):
+                        type_str = type_name.value
+                    else:
+                        type_str = str(type_name).upper()
+                    
+                    # 移除VARBINARY，因为炎凰SQL支持VARBINARY
+                    unsupported_types = ['JSONB', 'JSON', 'BYTEA', 'ARRAY', 'HSTORE', 'UUID']
+                    if type_str in unsupported_types:
+                        self.raise_error(f"{type_str} type is not supported in Yanhuang SQL")
+                
+                # 检查PostgreSQL特有的类型转换语法
+                elif isinstance(node, exp.Cast):
+                    to_type = node.args.get("to")
+                    if to_type and isinstance(to_type, exp.DataType):
+                        type_name = to_type.this
+                        if isinstance(type_name, exp.DataType.Type):
+                            type_str = type_name.value
+                        else:
+                            type_str = str(type_name).upper()
+                        
+                        # 检查不支持的类型转换，但VARBINARY是支持的
+                        unsupported_types = ['JSONB', 'JSON', 'BYTEA', 'ARRAY']
+                        if type_str in unsupported_types:
+                            self.raise_error(f"Casting to {type_str} type is not supported in Yanhuang SQL")
                 
                 return node
             
@@ -1078,7 +1145,26 @@ class Yanhuang(Postgres):
             pivoted_values = None
             if self._match(TokenType.IN):
                 self._match_l_paren()
-                pivoted_values = self._parse_csv(self._parse_bitwise)
+                # 修复：解析带引号的字符串字面量
+                pivoted_values = []
+                while not self._curr or self._curr.token_type != TokenType.R_PAREN:
+                    # 尝试解析字符串、数字或标识符
+                    if self._curr.token_type == TokenType.STRING:
+                        value = self._parse_string()
+                    elif self._curr.token_type == TokenType.NUMBER:
+                        value = self._parse_number()
+                    elif self._curr.token_type in (TokenType.VAR, TokenType.IDENTIFIER):
+                        value = self._parse_id_var()
+                    else:
+                        # 使用通用表达式解析
+                        value = self._parse_bitwise()
+                    
+                    if value:
+                        pivoted_values.append(value)
+                    
+                    if not self._match(TokenType.COMMA):
+                        break
+                
                 self._match_r_paren()
             
             # 解析USING子句
