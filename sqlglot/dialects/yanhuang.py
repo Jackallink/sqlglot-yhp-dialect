@@ -82,6 +82,7 @@ class Yanhuang(Postgres):
             
             # 字符串函数补充
             "SUBSTRING": lambda args: exp.Substring.from_arg_list(args),
+            "SUBSTR": lambda args: exp.Substring.from_arg_list(args),  # 炎凰SQL支持SUBSTR别名
             "POSITION": lambda args: exp.StrPosition.from_arg_list(args),
             "CHAR_LENGTH": lambda args: exp.Length.from_arg_list(args),
             "CHARACTER_LENGTH": lambda args: exp.Length.from_arg_list(args),
@@ -91,6 +92,15 @@ class Yanhuang(Postgres):
             "REPEAT": lambda args: exp.Repeat.from_arg_list(args),
             "LPAD": lambda args: exp.Anonymous(this="LPAD", expressions=args),
             "RPAD": lambda args: exp.Anonymous(this="RPAD", expressions=args),
+            "TRIM": lambda args: exp.Trim.from_arg_list(args),
+            "LTRIM": lambda args: exp.Anonymous(this="LTRIM", expressions=args),
+            "RTRIM": lambda args: exp.Anonymous(this="RTRIM", expressions=args),
+            "REPLACE": lambda args: exp.Anonymous(this="REPLACE", expressions=args),
+            "TRANSLATE": lambda args: exp.Anonymous(this="TRANSLATE", expressions=args),
+            "ASCII": lambda args: exp.Anonymous(this="ASCII", expressions=args),
+            "CHR": lambda args: exp.Anonymous(this="CHR", expressions=args),
+            "INITCAP": lambda args: exp.Anonymous(this="INITCAP", expressions=args),
+            "SPLIT_PART": lambda args: exp.Anonymous(this="SPLIT_PART", expressions=args),
             
             # 数学函数补充
             "ABS": lambda args: exp.Abs.from_arg_list(args),
@@ -108,24 +118,63 @@ class Yanhuang(Postgres):
             "ASIN": lambda args: exp.Anonymous(this="ASIN", expressions=args),
             "ACOS": lambda args: exp.Anonymous(this="ACOS", expressions=args),
             "ATAN": lambda args: exp.Anonymous(this="ATAN", expressions=args),
+            "ATAN2": lambda args: exp.Anonymous(this="ATAN2", expressions=args),
             "LOG": lambda args: exp.Log.from_arg_list(args),
             "LOG10": lambda args: exp.Anonymous(this="LOG10", expressions=args),
+            "LN": lambda args: exp.Ln.from_arg_list(args),
             "EXP": lambda args: exp.Exp.from_arg_list(args),
             "SIGN": lambda args: exp.Anonymous(this="SIGN", expressions=args),
             "TRUNC": lambda args: exp.Anonymous(this="TRUNC", expressions=args),
+            "TRUNCATE": lambda args: exp.Anonymous(this="TRUNCATE", expressions=args),
+            "RANDOM": lambda args: exp.Anonymous(this="RANDOM", expressions=args),
+            "PI": lambda args: exp.Anonymous(this="PI", expressions=args),
+            "DEGREES": lambda args: exp.Anonymous(this="DEGREES", expressions=args),
+            "RADIANS": lambda args: exp.Anonymous(this="RADIANS", expressions=args),
+            
+            # 日期时间函数补充
+            "NOW": exp.CurrentTimestamp.from_arg_list,
+            "CURRENT_TIMESTAMP": exp.CurrentTimestamp.from_arg_list,
+            "CURRENT_DATE": exp.CurrentDate.from_arg_list,
+            "CURRENT_TIME": exp.CurrentTime.from_arg_list,
+            "EXTRACT": exp.Extract.from_arg_list,
+            "DATE_PART": exp.Extract.from_arg_list,
+            "DATE_TRUNC": lambda args: exp.Anonymous(this="DATE_TRUNC", expressions=args),
+            "AGE": lambda args: exp.Anonymous(this="AGE", expressions=args),
+            "TO_TIMESTAMP": lambda args: exp.Anonymous(this="TO_TIMESTAMP", expressions=args),
+            "TO_DATE": lambda args: exp.Anonymous(this="TO_DATE", expressions=args),
+            "TO_CHAR": lambda args: exp.Anonymous(this="TO_CHAR", expressions=args),
+            "EPOCH": lambda args: exp.Anonymous(this="EPOCH", expressions=args),
             
             # 条件函数 - 重写DECODE以避免转换为CASE
             "IF": lambda args: exp.If.from_arg_list(args),
             "DECODE": lambda args: exp.Anonymous(this="DECODE", expressions=args),
+            "COALESCE": lambda args: exp.Coalesce.from_arg_list(args),
+            "NULLIF": lambda args: exp.Anonymous(this="NULLIF", expressions=args),  # 使用Anonymous替代
+            "GREATEST": lambda args: exp.Anonymous(this="GREATEST", expressions=args),
+            "LEAST": lambda args: exp.Anonymous(this="LEAST", expressions=args),
+            
+            # 类型转换函数
+            "TO_NUMBER": lambda args: exp.Anonymous(this="TO_NUMBER", expressions=args),
+            "TO_BINARY": lambda args: exp.Anonymous(this="TO_BINARY", expressions=args),
             
             # 炎凰SQL特有函数
             "TIME_BUCKET": lambda args: exp.Anonymous(this="TIME_BUCKET", expressions=args),
             "REGEX_EXTRACT": lambda args: exp.Anonymous(this="REGEX_EXTRACT", expressions=args),
             "REGEX_MATCH": lambda args: exp.Anonymous(this="REGEX_MATCH", expressions=args),
+            "REGEX_REPLACE": lambda args: exp.Anonymous(this="REGEX_REPLACE", expressions=args),
             "IP_TO_COUNTRY": lambda args: exp.Anonymous(this="IP_TO_COUNTRY", expressions=args),
             "IP_TO_REGION": lambda args: exp.Anonymous(this="IP_TO_REGION", expressions=args),
             "IP_TO_CITY": lambda args: exp.Anonymous(this="IP_TO_CITY", expressions=args),
             "GEOHASH": lambda args: exp.Anonymous(this="GEOHASH", expressions=args),
+            "GEOHASH_DECODE": lambda args: exp.Anonymous(this="GEOHASH_DECODE", expressions=args),
+            "UUID": lambda args: exp.Anonymous(this="UUID", expressions=args),
+            "MD5": lambda args: exp.Anonymous(this="MD5", expressions=args),
+            "SHA1": lambda args: exp.Anonymous(this="SHA1", expressions=args),
+            "SHA256": lambda args: exp.Anonymous(this="SHA256", expressions=args),
+            "BASE64_ENCODE": lambda args: exp.Anonymous(this="BASE64_ENCODE", expressions=args),
+            "BASE64_DECODE": lambda args: exp.Anonymous(this="BASE64_DECODE", expressions=args),
+            "URL_ENCODE": lambda args: exp.Anonymous(this="URL_ENCODE", expressions=args),
+            "URL_DECODE": lambda args: exp.Anonymous(this="URL_DECODE", expressions=args),
             
             # 补充遗漏的聚合函数（根据炎凰SQL语法文档）
             "MAX_STR": lambda args: exp.Anonymous(this="MAX_STR", expressions=args),
@@ -142,6 +191,21 @@ class Yanhuang(Postgres):
             "PRODUCT": lambda args: exp.Anonymous(this="PRODUCT", expressions=args),
             "LATEST_VALUE": lambda args: exp.Anonymous(this="LATEST_VALUE", expressions=args),
             "EARLIEST_VALUE": lambda args: exp.Anonymous(this="EARLIEST_VALUE", expressions=args),
+            "FIRST_VALUE": lambda args: exp.Anonymous(this="FIRST_VALUE", expressions=args),
+            "LAST_VALUE": lambda args: exp.Anonymous(this="LAST_VALUE", expressions=args),
+            "ARRAY_AGG": lambda args: exp.Anonymous(this="ARRAY_AGG", expressions=args),
+            "JSON_AGG": lambda args: exp.Anonymous(this="JSON_AGG", expressions=args),
+            "JSON_OBJECT_AGG": lambda args: exp.Anonymous(this="JSON_OBJECT_AGG", expressions=args),
+            
+            # 窗口函数补充
+            "ROW_NUMBER": lambda args: exp.Anonymous(this="ROW_NUMBER", expressions=args),
+            "RANK": lambda args: exp.Anonymous(this="RANK", expressions=args),
+            "DENSE_RANK": lambda args: exp.Anonymous(this="DENSE_RANK", expressions=args),
+            "PERCENT_RANK": lambda args: exp.Anonymous(this="PERCENT_RANK", expressions=args),
+            "CUME_DIST": lambda args: exp.Anonymous(this="CUME_DIST", expressions=args),
+            "NTILE": lambda args: exp.Anonymous(this="NTILE", expressions=args),
+            "LAG": lambda args: exp.Anonymous(this="LAG", expressions=args),
+            "LEAD": lambda args: exp.Anonymous(this="LEAD", expressions=args),
             
             # 表函数支持
             "GENERATE_SERIES": _build_generate_series,  # 复用PostgreSQL实现
@@ -150,11 +214,46 @@ class Yanhuang(Postgres):
             "PARSE_REGEX": lambda args: exp.Anonymous(this="PARSE_REGEX", expressions=args),
             "PARSE_KV": lambda args: exp.Anonymous(this="PARSE_KV", expressions=args),
             "PARSE_XML": lambda args: exp.Anonymous(this="PARSE_XML", expressions=args),
+            "PARSE_URL": lambda args: exp.Anonymous(this="PARSE_URL", expressions=args),
+            "PARSE_USER_AGENT": lambda args: exp.Anonymous(this="PARSE_USER_AGENT", expressions=args),
             "IP_LOCATION": lambda args: exp.Anonymous(this="IP_LOCATION", expressions=args),
             "GEO_DISTANCE": lambda args: exp.Anonymous(this="GEO_DISTANCE", expressions=args),
             "LOAD_CSV": lambda args: exp.Anonymous(this="LOAD_CSV", expressions=args),
             "LOAD_JSON": lambda args: exp.Anonymous(this="LOAD_JSON", expressions=args),
             "LOAD_PARQUET": lambda args: exp.Anonymous(this="LOAD_PARQUET", expressions=args),
+            "LOAD_XML": lambda args: exp.Anonymous(this="LOAD_XML", expressions=args),
+            "EXPLODE": lambda args: exp.Anonymous(this="EXPLODE", expressions=args),
+            "EXPLODE_OUTER": lambda args: exp.Anonymous(this="EXPLODE_OUTER", expressions=args),
+            "POSEXPLODE": lambda args: exp.Anonymous(this="POSEXPLODE", expressions=args),
+            "POSEXPLODE_OUTER": lambda args: exp.Anonymous(this="POSEXPLODE_OUTER", expressions=args),
+            "UNNEST": lambda args: exp.Anonymous(this="UNNEST", expressions=args),
+            
+            # JSON函数支持
+            "JSON_EXTRACT": lambda args: exp.Anonymous(this="JSON_EXTRACT", expressions=args),
+            "JSON_EXTRACT_PATH_TEXT": lambda args: exp.Anonymous(this="JSON_EXTRACT_PATH_TEXT", expressions=args),
+            "JSON_ARRAY_LENGTH": lambda args: exp.Anonymous(this="JSON_ARRAY_LENGTH", expressions=args),
+            "JSON_OBJECT_KEYS": lambda args: exp.Anonymous(this="JSON_OBJECT_KEYS", expressions=args),
+            "JSON_TYPEOF": lambda args: exp.Anonymous(this="JSON_TYPEOF", expressions=args),
+            "JSON_VALID": lambda args: exp.Anonymous(this="JSON_VALID", expressions=args),
+            "JSON_PRETTY": lambda args: exp.Anonymous(this="JSON_PRETTY", expressions=args),
+            
+            # 数组函数支持
+            "ARRAY_LENGTH": lambda args: exp.Anonymous(this="ARRAY_LENGTH", expressions=args),
+            "ARRAY_APPEND": lambda args: exp.Anonymous(this="ARRAY_APPEND", expressions=args),
+            "ARRAY_PREPEND": lambda args: exp.Anonymous(this="ARRAY_PREPEND", expressions=args),
+            "ARRAY_CAT": lambda args: exp.Anonymous(this="ARRAY_CAT", expressions=args),
+            "ARRAY_POSITION": lambda args: exp.Anonymous(this="ARRAY_POSITION", expressions=args),
+            "ARRAY_REMOVE": lambda args: exp.Anonymous(this="ARRAY_REMOVE", expressions=args),
+            "ARRAY_REPLACE": lambda args: exp.Anonymous(this="ARRAY_REPLACE", expressions=args),
+            "ARRAY_TO_STRING": lambda args: exp.Anonymous(this="ARRAY_TO_STRING", expressions=args),
+            "STRING_TO_ARRAY": lambda args: exp.Anonymous(this="STRING_TO_ARRAY", expressions=args),
+            
+            # 其他工具函数
+            "VERSION": lambda args: exp.Anonymous(this="VERSION", expressions=args),
+            "USER": lambda args: exp.Anonymous(this="USER", expressions=args),
+            "DATABASE": lambda args: exp.Anonymous(this="DATABASE", expressions=args),
+            "SCHEMA": lambda args: exp.Anonymous(this="SCHEMA", expressions=args),
+            "CONNECTION_ID": lambda args: exp.Anonymous(this="CONNECTION_ID", expressions=args),
         }
 
         # 重写FUNCTION_PARSERS来移除DECODE的特殊解析
@@ -175,6 +274,8 @@ class Yanhuang(Postgres):
             **Postgres.Parser.STATEMENT_PARSERS,
             TokenType.DELETE: lambda self: self._parse_delete(),
             TokenType.DESCRIBE: lambda self: self._parse_describe(),
+            TokenType.VALUES: lambda self: self._parse_values(),
+            TokenType.SHOW: lambda self: self._parse_show(),
         }
 
         SUPPORTS_IMPLICIT_UNNEST = True
@@ -388,25 +489,34 @@ class Yanhuang(Postgres):
 
         def _parse_statement(self):
             """解析语句并应用炎凰SQL特定的转换和限制检查"""
-            statement = super()._parse_statement()
-            
-            if statement is None:
-                return None
-            
-            # 应用窗口函数转换
-            statement = self._apply_window_function_transforms(statement)
-            
-            # 应用各种限制检查
-            statement = self._check_unsupported_window_features(statement)
-            statement = self._check_correlated_subqueries(statement)
-            statement = self._check_window_function_restrictions(statement)
-            statement = self._check_unsupported_set_operations(statement)
-            statement = self._check_tablesample_limitations(statement)
-            statement = self._check_distinct_limitations(statement)
-            statement = self._check_delete_limitations(statement)
-            statement = self._check_table_ddl_limitations(statement)
-            
-            return statement
+            # 直接回退到父类实现，避免复杂的自定义逻辑导致问题
+            try:
+                statement = super()._parse_statement()
+                if statement is None:
+                    return None
+                
+                # 对所有语句都应用集合操作检查
+                statement = self._check_unsupported_set_operations(statement)
+                
+                # 根据语句类型应用特定检查
+                if isinstance(statement, exp.Select):
+                    statement = self._apply_window_function_transforms(statement)
+                    statement = self._check_unsupported_window_features(statement)
+                    statement = self._check_correlated_subqueries(statement)
+                    statement = self._check_window_function_restrictions(statement)
+                    statement = self._check_tablesample_limitations(statement)
+                    statement = self._check_distinct_limitations(statement)
+                elif isinstance(statement, exp.Delete):
+                    statement = self._check_delete_limitations(statement)
+                elif isinstance(statement, exp.Create):
+                    statement = self._check_table_ddl_limitations(statement)
+                
+                return statement
+            except AttributeError as e:
+                if "'NoneType' object has no attribute 'add_comments'" in str(e):
+                    # 如果父类返回None但尝试调用add_comments，返回None
+                    return None
+                raise
 
         def _apply_window_function_transforms(self, statement):
             """应用窗口函数兼容性转换（智能降级）"""
@@ -542,23 +652,45 @@ class Yanhuang(Postgres):
             """查找表达式中的窗口函数运算"""
             windows = []
             
+            if expr is None:
+                return windows
+            
+            # 只在运算表达式中查找窗口函数，不处理单独的窗口函数
             if isinstance(expr, exp.Binary):
-                # 检查左右操作数是否为窗口函数
-                if isinstance(expr.this, exp.Window):
-                    windows.append(expr.this)
-                if isinstance(expr.expression, exp.Window):
-                    windows.append(expr.expression)
-                # 递归检查子表达式
-                windows.extend(self._find_window_arithmetic_expressions(expr.this))
-                windows.extend(self._find_window_arithmetic_expressions(expr.expression))
+                # 检查左右操作数是否为窗口函数 - 这才是真正的窗口函数运算
+                left_is_window = isinstance(expr.this, exp.Window)
+                right_is_window = isinstance(expr.expression, exp.Window)
+                
+                if left_is_window or right_is_window:
+                    # 这是窗口函数参与的运算，需要转换
+                    if left_is_window:
+                        windows.append(expr.this)
+                    if right_is_window:
+                        windows.append(expr.expression)
+                else:
+                    # 递归检查子表达式中的窗口函数运算
+                    windows.extend(self._find_window_arithmetic_expressions(expr.this))
+                    windows.extend(self._find_window_arithmetic_expressions(expr.expression))
             elif isinstance(expr, exp.Unary):
+                # 一元运算符作用于窗口函数
                 if isinstance(expr.this, exp.Window):
                     windows.append(expr.this)
-                windows.extend(self._find_window_arithmetic_expressions(expr.this))
-            elif hasattr(expr, 'expressions') and expr.expressions:
-                for sub_expr in expr.expressions:
-                    windows.extend(self._find_window_arithmetic_expressions(sub_expr))
+                else:
+                    windows.extend(self._find_window_arithmetic_expressions(expr.this))
+            # 不要将单独的窗口函数视为需要转换的情况
+            # elif isinstance(expr, exp.Window):
+            #     # 直接是窗口函数 - 这是标准用法，不需要转换
+            #     pass
+            elif hasattr(expr, 'expressions') and expr.expressions is not None:
+                # 有expressions属性的表达式类型（如Coalesce, Anonymous等）
+                try:
+                    for sub_expr in expr.expressions:
+                        windows.extend(self._find_window_arithmetic_expressions(sub_expr))
+                except TypeError:
+                    # 如果expressions不可迭代，跳过
+                    pass
             elif hasattr(expr, 'args') and expr.args:
+                # 通过args属性遍历其他子表达式
                 for key, value in expr.args.items():
                     if isinstance(value, exp.Expression):
                         windows.extend(self._find_window_arithmetic_expressions(value))
@@ -568,10 +700,6 @@ class Yanhuang(Postgres):
                                 windows.extend(self._find_window_arithmetic_expressions(item))
             
             return windows
-
-        def _replace_window_in_arithmetic(self, expr, window_expr, alias_name):
-            """在运算表达式中替换窗口函数为列引用（已废弃，使用transform方法替代）"""
-            return expr
 
         def _transform_window_clauses(self, statement):
             """转换WINDOW子句为内联OVER子句"""
@@ -622,10 +750,6 @@ class Yanhuang(Postgres):
             new_statement.set("windows", None)
             
             return new_statement
-
-        def _replace_window_references(self, expr, window_definitions):
-            """替换窗口函数中的窗口引用为内联规格（已废弃，使用transform方法替代）"""
-            return expr
 
         def _check_unsupported_window_features(self, statement):
             """检查无法降级的窗口函数功能"""
@@ -763,92 +887,31 @@ class Yanhuang(Postgres):
             
             return statement.transform(check_node)
 
-        def _parse_group(self, skip_group_by_token: bool = False) -> t.Optional[exp.Group]:
-            """Override to support GROUP BY TIME() syntax"""
-            if not skip_group_by_token and not self._match(TokenType.GROUP_BY):
-                return None
-
-            expressions = []
-
-            while True:
-                # 检查TIME()语法
-                if self._match_texts(["TIME"]):
-                    if not self._match(TokenType.L_PAREN):
-                        self.raise_error("TIME后必须跟括号")
-
-                    # 解析TIME()参数，格式为key=value
-                    time_args = []
-                    while True:
-                        # 尝试解析参数名
-                        if self._curr:
-                            key_expr = self._parse_id_var()
-                            if key_expr:
-                                if not self._match(TokenType.EQ):
-                                    self.raise_error("TIME参数期望格式为key=value")
-                                value = self._parse_string() or self._parse_number() or self._parse_id_var()
-                                if not value:
-                                    self.raise_error("TIME参数值不能为空")
-                                
-                                # 创建参数表达式，使用PropertyEQ来表示key=value
-                                param_expr = self.expression(
-                                    exp.PropertyEQ,
-                                    this=key_expr,
-                                    expression=value
-                                )
-                                time_args.append(param_expr)
-                            else:
-                                break
-                        else:
-                            break
-                        
-                        if not self._match(TokenType.COMMA):
-                            break
-
-                    if not self._match(TokenType.R_PAREN):
-                        self.raise_error("TIME()缺少右括号")
-
-                    # 创建TIME特殊表达式
-                    time_expr = self.expression(
-                        exp.Anonymous,
-                        this="TIME",
-                        expressions=time_args
-                    )
-                    expressions.append(time_expr)
-                else:
-                    # 常规GROUP BY表达式
-                    expr = self._parse_bitwise()
-                    if not expr:
-                        break
-                    expressions.append(expr)
-
-                if not self._match(TokenType.COMMA):
-                    break
-
-            return self.expression(exp.Group, expressions=expressions) if expressions else None
-
         def _parse_describe(self) -> t.Optional[exp.Describe]:
             """解析DESCRIBE语句"""
-            # DESCRIBE token已经被STATEMENT_PARSERS消费了，直接解析表名
-            table = self._parse_table()
-            if not table:
-                self.raise_error("Expected table name after DESCRIBE")
-            
-            return self.expression(exp.Describe, this=table)
+            self._match(TokenType.DESCRIBE)
+            return self.expression(
+                exp.Describe,
+                this=self._parse_table()
+            )
 
         def _parse_delete(self) -> exp.Delete:
-            """Override to support Yanhuang DELETE syntax with ORDER BY and LIMIT"""
-            # 调用父类的DELETE解析器来处理基本的DELETE语法
+            """
+            解析DELETE语句，支持炎凰SQL的增强语法：
+            DELETE FROM table WHERE condition ORDER BY column LIMIT number
+            """
+            # 先调用父类的DELETE解析器
             delete_stmt = super()._parse_delete()
             
-            # 如果父类解析成功，添加炎凰SQL特有的ORDER BY和LIMIT支持
+            # 如果父类解析成功，检查并添加ORDER BY和LIMIT支持
             if delete_stmt:
-                # 解析ORDER BY（如果存在）
+                # 检查是否有ORDER BY（父类可能没有解析）
                 if not delete_stmt.args.get("order"):
                     order = self._parse_order()
                     if order:
                         delete_stmt.set("order", order)
                 
-                # 解析LIMIT（如果存在且父类没有解析）
+                # 检查是否有LIMIT（父类可能没有解析）
                 if not delete_stmt.args.get("limit"):
                     limit = self._parse_limit()
                     if limit:
@@ -856,62 +919,143 @@ class Yanhuang(Postgres):
             
             return delete_stmt
 
-        def _parse_create_table_ddl(self) -> t.Optional[exp.Create]:
-            """解析CREATE TABLE语法，支持ENGINE和WITH参数"""
-            table = self._parse_table()
-            if not table:
-                self.raise_error("CREATE TABLE缺少表名")
+        def _parse_values(self) -> t.Optional[exp.Values]:
+            """
+            解析VALUES语句，支持别名
+            VALUES (expression [, ...]) [, ...] [AS alias[(column1, column2, ...)]]
+            """
+            self._match(TokenType.VALUES)
             
-            engine = None
-            properties = []
-            
-            # 解析ENGINE=xxx
-            if self._match_texts(["ENGINE"]):
-                if not self._match(TokenType.EQ):
-                    self.raise_error("ENGINE后必须跟=")
-                engine_name = self._parse_id_var()
-                if not engine_name:
-                    self.raise_error("ENGINE缺少引擎名称")
-                engine = engine_name.name if hasattr(engine_name, 'name') else str(engine_name)
-            
-            # 解析WITH (key=value, ...)
-            if self._match_texts(["WITH"]):
+            expressions = []
+            while True:
                 if not self._match(TokenType.L_PAREN):
-                    self.raise_error("WITH后必须跟括号")
-                
-                while True:
-                    key = self._parse_id_var()
-                    if not key:
-                        break
-                    if not self._match(TokenType.EQ):
-                        self.raise_error("WITH参数期望格式为key=value")
-                    value = self._parse_string() or self._parse_number() or self._parse_id_var()
-                    if not value:
-                        self.raise_error("WITH参数值不能为空")
+                    break
                     
-                    # 创建属性表达式
-                    prop = self.expression(
-                        exp.Property,
-                        this=exp.Literal.string(key.name if hasattr(key, 'name') else str(key)),
-                        value=value
-                    )
-                    properties.append(prop)
-                    
-                    if not self._match(TokenType.COMMA):
-                        break
-                
+                row_expressions = self._parse_csv(self._parse_expression)
                 if not self._match(TokenType.R_PAREN):
-                    self.raise_error("WITH参数缺少右括号")
+                    self.raise_error("Expected ')' after VALUES row")
+                    
+                expressions.append(
+                    self.expression(exp.Tuple, expressions=row_expressions)
+                )
+                
+                if not self._match(TokenType.COMMA):
+                    break
             
-            create_table = self.expression(
-                exp.Create,
-                this=self.expression(exp.Schema, this=table),
-                kind="TABLE",
-                engine=engine,
-                properties=properties
-            )
+            values_expr = self.expression(exp.Values, expressions=expressions)
             
-            return create_table
+            # 检查是否有AS别名
+            if self._match(TokenType.ALIAS):
+                alias_name = self._parse_id_var()
+                if not alias_name:
+                    self.raise_error("Expected alias name after AS")
+                
+                # 检查是否有列名列表
+                column_names = None
+                if self._match(TokenType.L_PAREN):
+                    column_names = self._parse_csv(self._parse_id_var)
+                    if not self._match(TokenType.R_PAREN):
+                        self.raise_error("Expected ')' after column names")
+                
+                # 创建表别名结构
+                if column_names:
+                    # 创建TableAlias对象包含列名
+                    table_alias = self.expression(
+                        exp.TableAlias,
+                        this=alias_name,
+                        columns=column_names
+                    )
+                else:
+                    # 只有表别名，没有列名
+                    table_alias = self.expression(
+                        exp.TableAlias,
+                        this=alias_name
+                    )
+                
+                # 将VALUES包装为带别名的Alias表达式
+                return self.expression(exp.Alias, this=values_expr, alias=table_alias)
+            
+            return values_expr
+            
+        def _parse_show(self) -> t.Optional[exp.Show]:
+            """
+            解析SHOW语句
+            SHOW [FULL] TABLES [WHERE condition]
+            """
+            self._match(TokenType.SHOW)
+            
+            full = self._match_text_seq("FULL")
+            
+            if self._match_text_seq("TABLES"):
+                where = self._parse_where()
+                return self.expression(
+                    exp.Show,
+                    this="TABLES",
+                    full=full,
+                    where=where
+                )
+            else:
+                # 其他SHOW语句类型
+                target = self._parse_string() or self._parse_var()
+                return self.expression(
+                    exp.Show,
+                    this=target
+                )
+
+        def _parse_create_table_ddl(self) -> t.Optional[exp.Create]:
+            """
+            解析CREATE TABLE语句，支持炎凰SQL的ENGINE语法：
+            CREATE [OR REPLACE] TABLE table_name [ENGINE=engine_type [WITH (setting_1=value_1[, setting_2=value2, ...])]]
+            """
+            # 先调用父类的CREATE TABLE解析
+            create_stmt = super()._parse_create()
+            
+            if not create_stmt or create_stmt.args.get("kind") != "TABLE":
+                return create_stmt
+                
+            # 检查是否有ENGINE子句
+            if self._match_text_seq("ENGINE"):
+                self._match(TokenType.EQ)
+                engine_type = self._parse_var() or self._parse_string()
+                
+                if not engine_type:
+                    self.raise_error("Expected engine type after ENGINE=")
+                
+                # 检查是否有WITH子句
+                with_properties = None
+                if self._match_text_seq("WITH"):
+                    if not self._match(TokenType.L_PAREN):
+                        self.raise_error("Expected '(' after WITH")
+                    
+                    properties = []
+                    while not self._match(TokenType.R_PAREN):
+                        prop_name = self._parse_var() or self._parse_string()
+                        if not prop_name:
+                            self.raise_error("Expected property name")
+                            
+                        self._match(TokenType.EQ)
+                        prop_value = self._parse_primary()
+                        if not prop_value:
+                            self.raise_error("Expected property value")
+                            
+                        properties.append(
+                            self.expression(exp.Property, this=prop_name, value=prop_value)
+                        )
+                        
+                        if not self._match(TokenType.COMMA):
+                            break
+                    
+                    if not self._match(TokenType.R_PAREN):
+                        self.raise_error("Expected ')' after WITH properties")
+                        
+                    with_properties = properties
+                
+                # 将ENGINE和WITH信息添加到CREATE语句中
+                create_stmt.set("engine", engine_type)
+                if with_properties:
+                    create_stmt.set("engine_properties", with_properties)
+            
+            return create_stmt
 
         def _parse_pivot_statement(self) -> t.Optional[exp.Pivot]:
             """解析PIVOT语句"""
@@ -1066,6 +1210,69 @@ class Yanhuang(Postgres):
                 percent=percent
             )
 
+        def _parse_group(self, skip_group_by_token: bool = False) -> t.Optional[exp.Group]:
+            """Override to support GROUP BY TIME() syntax"""
+            if not skip_group_by_token and not self._match(TokenType.GROUP_BY):
+                return None
+
+            expressions = []
+
+            while True:
+                # 检查TIME()语法
+                if self._match_texts(["TIME"]):
+                    if not self._match(TokenType.L_PAREN):
+                        self.raise_error("TIME后必须跟括号")
+
+                    # 解析TIME()参数，格式为key=value
+                    time_args = []
+                    while True:
+                        # 尝试解析参数名
+                        if self._curr:
+                            key_expr = self._parse_id_var()
+                            if key_expr:
+                                if not self._match(TokenType.EQ):
+                                    self.raise_error("TIME参数期望格式为key=value")
+                                value = self._parse_string() or self._parse_number() or self._parse_id_var()
+                                if not value:
+                                    self.raise_error("TIME参数值不能为空")
+                                
+                                # 创建参数表达式，使用PropertyEQ来表示key=value
+                                param_expr = self.expression(
+                                    exp.PropertyEQ,
+                                    this=key_expr,
+                                    expression=value
+                                )
+                                time_args.append(param_expr)
+                            else:
+                                break
+                        else:
+                            break
+                        
+                        if not self._match(TokenType.COMMA):
+                            break
+
+                    if not self._match(TokenType.R_PAREN):
+                        self.raise_error("TIME()缺少右括号")
+
+                    # 创建TIME特殊表达式
+                    time_expr = self.expression(
+                        exp.Anonymous,
+                        this="TIME",
+                        expressions=time_args
+                    )
+                    expressions.append(time_expr)
+                else:
+                    # 常规GROUP BY表达式
+                    expr = self._parse_bitwise()
+                    if not expr:
+                        break
+                    expressions.append(expr)
+
+                if not self._match(TokenType.COMMA):
+                    break
+
+            return self.expression(exp.Group, expressions=expressions) if expressions else None
+
     class Tokenizer(Postgres.Tokenizer):
         BIT_STRINGS = []
         HEX_STRINGS = []
@@ -1092,8 +1299,16 @@ class Yanhuang(Postgres):
             "APPLY": TokenType.APPLY,
             "SAMPLE": TokenType.TABLE_SAMPLE,  # 将SAMPLE映射到TABLE_SAMPLE token
             "TABLESAMPLE": TokenType.COMMAND,  # 将TABLESAMPLE映射到COMMAND，后续会被拒绝
+            
+            # 炎凰SQL特有关键词
+            "ENGINE": TokenType.VAR,  # CREATE TABLE语句中的ENGINE关键字
+            "BERNOULLI": TokenType.VAR,  # SAMPLE语法中的采样方法
+            "ROW": TokenType.ROW,       # SAMPLE语法中的采样方法  
+            "BLOCK": TokenType.VAR,     # SAMPLE语法中的采样方法
+            "SYSTEM": TokenType.VAR,    # SAMPLE语法中的采样方法
+            "UESCAPE": TokenType.VAR,   # Unicode字符串转义语法
+            "FULL": TokenType.VAR,      # SHOW FULL TABLES语法
         }
-        KEYWORDS.pop("VALUES")
 
         # Redshift allows # to appear as a table identifier prefix
         SINGLE_TOKENS = Postgres.Tokenizer.SINGLE_TOKENS.copy()
@@ -1118,7 +1333,8 @@ class Yanhuang(Postgres):
         ALTER_SET_TYPE = "TYPE"
 
         # Redshift doesn't have `WITH` as part of their with_properties so we remove it
-        WITH_PROPERTIES_PREFIX = " "
+        # 炎凰SQL需要保留WITH关键字，但在properties_sql中处理
+        WITH_PROPERTIES_PREFIX = ""
 
         TYPE_MAPPING = {
             **Postgres.Generator.TYPE_MAPPING,
@@ -1181,6 +1397,7 @@ class Yanhuang(Postgres):
             exp.VariancePop: rename_func("VAR_POP"),
             exp.With: lambda self, e: self.with_sql(e),
             exp.WithinGroup: lambda self, e: self.withingroup_sql(e),
+            exp.Show: lambda self, e: self.show_sql(e),  # 添加SHOW语句支持
             
             # 表函数转换
             exp.ExplodingGenerateSeries: lambda self, e: self.func("GENERATE_SERIES", e.args.get("start"), e.args.get("end"), e.args.get("step")) if e.args.get("step") else self.func("GENERATE_SERIES", e.args.get("start"), e.args.get("end")),
@@ -1765,51 +1982,28 @@ class Yanhuang(Postgres):
             # 普通UNION处理
             return super().union_sql(expression)
 
-        def setop_sql(self, expression: exp.Union, op: str) -> str:
-            """处理集合操作"""
-            # 这个方法不再需要，因为我们直接在union_sql中处理
-            return self.set_operations(expression)
-
         def create_sql(self, expression: exp.Create) -> str:
-            """生成CREATE语句SQL，支持ENGINE和WITH"""
+            """生成CREATE语句SQL，支持炎凰SQL的ENGINE和WITH语法"""
+            sql = super().create_sql(expression)
+            
+            # 如果是CREATE TABLE且有ENGINE信息，添加ENGINE子句
             if expression.args.get("kind") == "TABLE":
-                sql = "CREATE"
-                if expression.args.get("replace"):
-                    sql += " OR REPLACE"
-                sql += f" TABLE {self.sql(expression.this)}"
-                
-                # 处理schema（列定义）
-                if expression.args.get("schema"):
-                    schema_sql = self.sql(expression.args["schema"])
-                    sql += f" {schema_sql}"
-                
-                if expression.args.get("properties"):
-                    props = []
-                    engine_added = False
-                    for prop in expression.args["properties"].expressions:
-                        if isinstance(prop, exp.EngineProperty):
-                            # EngineProperty只有this属性，没有value属性
-                            if not engine_added:
-                                engine_name = self.sql(prop.this)
-                                sql += f" ENGINE={engine_name}"
-                                engine_added = True
-                        elif isinstance(prop, exp.Property):
-                            # 普通Property有key=value
-                            key = self.sql(prop.this)
-                            value = prop.args.get('value')
-                            if value is not None:
-                                value_sql = self.sql(value)
-                                props.append(f"{key}={value_sql}")
-                            else:
-                                # 只有key没有value的属性（如disabled）
-                                props.append(key)
-                    if props:
-                        sql += f" WITH ({', '.join(props)})"
-                
-                return sql
-            else:
-                # 其他CREATE语句使用父类处理
-                return super().create_sql(expression)
+                engine = expression.args.get("engine")
+                if engine:
+                    sql += f" ENGINE={self.sql(engine)}"
+                    
+                # 如果有ENGINE属性，添加WITH子句
+                engine_properties = expression.args.get("engine_properties")
+                if engine_properties:
+                    properties_sql = []
+                    for prop in engine_properties:
+                        prop_name = self.sql(prop.this)
+                        prop_value = self.sql(prop.args.get("value"))
+                        properties_sql.append(f"{prop_name}={prop_value}")
+                    
+                    sql += f" WITH ({', '.join(properties_sql)})"
+            
+            return sql
 
         def group_sql(self, expression: exp.Group) -> str:
             """生成GROUP BY语句，支持TIME()语法"""
@@ -1874,15 +2068,64 @@ class Yanhuang(Postgres):
             return f"E'{escaped_string}'"
 
         def unicodestring_sql(self, expression: exp.UnicodeString) -> str:
-            """
-            生成U&前缀字符串的SQL，用于Unicode编码
-            """
-            string_value = self.sql(expression, "this")
-            escape = expression.args.get("escape")
+            """生成Unicode字符串SQL"""
+            prefix = "U&"
+            quote_char = "'"  # 使用固定的单引号
+            value = expression.this
             
-            if escape:
-                escape_sql = f" UESCAPE {self.sql(escape)}"
+            # 处理UESCAPE
+            escape_char = expression.args.get("escape")
+            if escape_char:
+                # escape_char可能是Literal对象，需要获取其值
+                escape_value = escape_char.this if hasattr(escape_char, 'this') else escape_char
+                return f"{prefix}{quote_char}{value}{quote_char} UESCAPE {quote_char}{escape_value}{quote_char}"
             else:
-                escape_sql = ""
+                return f"{prefix}{quote_char}{value}{quote_char}"
+                
+        def show_sql(self, expression: exp.Show) -> str:
+            """生成SHOW语句SQL"""
+            target = expression.this
+            full = expression.args.get("full")
+            where = expression.args.get("where")
             
-            return f"U&'{string_value}'{escape_sql}"
+            parts = ["SHOW"]
+            
+            if full:
+                parts.append("FULL")
+                
+            if isinstance(target, str):
+                parts.append(target)
+            else:
+                parts.append(self.sql(target))
+                
+            if where:
+                parts.append(f"WHERE {self.sql(where)}")
+                
+            return " ".join(parts)
+
+        def properties_sql(self, expression: exp.Properties) -> str:
+            """生成Properties SQL，为炎凰SQL添加WITH关键字"""
+            if not expression or not expression.expressions:
+                return ""
+            
+            props = []
+            for prop in expression.expressions:
+                if isinstance(prop, exp.EngineProperty):
+                    # ENGINE属性不在括号内
+                    props.append(f"ENGINE={self.sql(prop.this)}")
+                else:
+                    # 其他属性在WITH括号内
+                    prop_sql = self.sql(prop)
+                    props.append(prop_sql)
+            
+            # 分离ENGINE和其他属性
+            engine_props = [p for p in props if p.startswith("ENGINE=")]
+            other_props = [p for p in props if not p.startswith("ENGINE=")]
+            
+            result = ""
+            if engine_props:
+                result += " ".join(engine_props)
+            if other_props:
+                result += f" WITH ({', '.join(other_props)})"
+                
+            return result
