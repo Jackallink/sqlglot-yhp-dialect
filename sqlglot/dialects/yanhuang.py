@@ -801,6 +801,36 @@ class Yanhuang(Postgres):
             "DATABASE": lambda args: exp.Anonymous(this="DATABASE", expressions=args),
             "SCHEMA": lambda args: exp.Anonymous(this="SCHEMA", expressions=args),
             "CONNECTION_ID": lambda args: exp.Anonymous(this="CONNECTION_ID", expressions=args),
+            
+            # Python表函数支持
+            "LOAD_EXCEL": lambda args: exp.Anonymous(this="LOAD_EXCEL", expressions=args),
+            "PARSE_FORMAT": lambda args: exp.Anonymous(this="PARSE_FORMAT", expressions=args),
+            "PARSE_GROK": lambda args: exp.Anonymous(this="PARSE_GROK", expressions=args),
+            "PARSE_SQL": lambda args: exp.Anonymous(this="PARSE_SQL", expressions=args),
+            "FAKER": lambda args: exp.Anonymous(this="FAKER", expressions=args),
+            "SUMMARIZE": lambda args: exp.Anonymous(this="SUMMARIZE", expressions=args),
+            "PIVOT_TABLE": lambda args: exp.Anonymous(this="PIVOT_TABLE", expressions=args),
+            "UNPIVOT_TABLE": lambda args: exp.Anonymous(this="UNPIVOT_TABLE", expressions=args),
+            "TRANSPOSE": lambda args: exp.Anonymous(this="TRANSPOSE", expressions=args),
+            "URL": lambda args: exp.Anonymous(this="URL", expressions=args),
+            
+            # Java表函数支持
+            "JDBC": lambda args: exp.Anonymous(this="JDBC", expressions=args),
+            
+            # Rust表函数支持
+            "DISSECT": lambda args: exp.Anonymous(this="DISSECT", expressions=args),
+            
+            # 附加的C++表函数
+            "PARSE_AUTOKV": lambda args: exp.Anonymous(this="PARSE_AUTOKV", expressions=args),
+            "PARSE_DELIMITED": lambda args: exp.Anonymous(this="PARSE_DELIMITED", expressions=args),
+            "PARSE_JSON_KV_TABLE": lambda args: exp.Anonymous(this="PARSE_JSON_KV_TABLE", expressions=args),
+            "XPATH": lambda args: exp.Anonymous(this="XPATH", expressions=args),
+            "LOOKUP": lambda args: exp.Anonymous(this="LOOKUP", expressions=args),
+            "MULTI_LOOKUP": lambda args: exp.Anonymous(this="MULTI_LOOKUP", expressions=args),
+            "LOAD_JOB_RESULT": lambda args: exp.Anonymous(this="LOAD_JOB_RESULT", expressions=args),
+            "SAVED_SEARCH": lambda args: exp.Anonymous(this="SAVED_SEARCH", expressions=args),
+            "CURRENT_JOB_META": lambda args: exp.Anonymous(this="CURRENT_JOB_META", expressions=args),
+            "GENERATE_TIME_BUCKETS": lambda args: exp.Anonymous(this="GENERATE_TIME_BUCKETS", expressions=args),
         }
         
         # 重写FUNCTION_PARSERS来移除DECODE的特殊解析
