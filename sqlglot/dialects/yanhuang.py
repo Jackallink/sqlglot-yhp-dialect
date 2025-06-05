@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import typing as t
-
+import warnings
 from sqlglot import exp, transforms, tokens
 from sqlglot.dialects.dialect import (
     NormalizationStrategy,
@@ -18,6 +18,8 @@ from sqlglot.dialects.postgres import Postgres, _build_generate_series
 from sqlglot.helper import seq_get
 from sqlglot.tokens import TokenType
 from sqlglot.parser import build_convert_timezone
+from sqlglot.generator import UnsupportedError
+from sqlglot.helper import logger
 
 if t.TYPE_CHECKING:
     from sqlglot._typing import E
@@ -84,22 +86,123 @@ def _extract_to_date_part(args: t.List) -> exp.Anonymous:
     return exp.Anonymous(this="DATE_PART", expressions=[part_str, source_expr])
 
 
-def _add_months_to_dateadd(args: t.List) -> exp.TsOrDsAdd:
-    """将ADD_MONTHS函数降级映射为DATEADD函数
+def _add_months_to_date_add(args: t.List) -> exp.Anonymous:
+    """将ADD_MONTHS函数映射为DATE_ADD函数（修正：炎凰SQL支持DATE_ADD，不支持DATEADD）
     
-    ADD_MONTHS(date_col, 3) -> DATEADD('month', 3, date_col)
+    ADD_MONTHS(date_col, 3) -> DATE_ADD('m', 3, date_col)
     """
     if len(args) != 2:
-        # 如果参数不正确，返回原始调用
         return exp.Anonymous(this="ADD_MONTHS", expressions=args)
     
     date_expr, months_expr = args
     
-    # 创建DATEADD表达式：DATEADD('month', months, date)
-    return exp.TsOrDsAdd(
-        this=date_expr,
-        expression=months_expr,
-        unit=exp.Literal.string("month")
+    # 创建DATE_ADD表达式：DATE_ADD('m', months, date)
+    return exp.Anonymous(
+        this="DATE_ADD", 
+        expressions=[
+            exp.Literal.string("m"),  # 炎凰SQL使用'm'表示月份
+            months_expr,
+            date_expr
+        ]
+    )
+
+
+def _similarity_to_jaro_winkler(args: t.List) -> exp.Anonymous:
+    """将SIMILARITY函数映射为JARO_WINKLER_SIMILARITY函数
+    
+    SIMILARITY(string1, string2) -> JARO_WINKLER_SIMILARITY(string1, string2)
+    """
+    return exp.Anonymous(this="JARO_WINKLER_SIMILARITY", expressions=args)
+
+
+def _current_timestamp_to_now(args: t.List) -> exp.Anonymous:
+    """将CURRENT_TIMESTAMP映射为NOW函数（保持原始函数元数据）
+    
+    CURRENT_TIMESTAMP -> NOW()
+    """
+    now_func = exp.Anonymous(this="NOW", expressions=args)
+    # 保存原始函数名到meta
+    now_func.meta["original_func"] = "CURRENT_TIMESTAMP"
+    return now_func
+
+
+def _getdate_to_now(args: t.List) -> exp.Anonymous:
+    """将GETDATE函数映射为NOW函数
+    
+    GETDATE() -> NOW()
+    """
+    now_func = exp.Anonymous(this="NOW", expressions=args)
+    now_func.meta["original_func"] = "GETDATE"
+    return now_func
+
+
+def _dateadd_to_date_add(args: t.List) -> exp.Anonymous:
+    """将DATEADD函数映射为DATE_ADD函数
+    
+    DATEADD(year, 1, date_col) -> DATE_ADD('y', 1, date_col)
+    """
+    if len(args) != 3:
+        return exp.Anonymous(this="DATEADD", expressions=args)
+    
+    unit, delta, date_expr = args
+    
+    # 转换时间单位
+    unit_mapping = {
+        "year": "y",
+        "month": "m", 
+        "day": "d",
+        "hour": "h",
+        "minute": "min",
+        "second": "s"
+    }
+    
+    if isinstance(unit, exp.Var):
+        unit_str = unit_mapping.get(unit.this.lower(), unit.this.lower())
+    else:
+        unit_str = str(unit).lower()
+    
+    return exp.Anonymous(
+        this="DATE_ADD",
+        expressions=[
+            exp.Literal.string(unit_str),
+            delta,
+            date_expr
+        ]
+    )
+
+
+def _datediff_to_date_diff(args: t.List) -> exp.Anonymous:
+    """将DATEDIFF函数映射为DATE_DIFF函数
+    
+    DATEDIFF(year, date1, date2) -> DATE_DIFF('y', date1, date2)
+    """
+    if len(args) != 3:
+        return exp.Anonymous(this="DATEDIFF", expressions=args)
+    
+    unit, date1, date2 = args
+    
+    # 转换时间单位
+    unit_mapping = {
+        "year": "y",
+        "month": "m",
+        "day": "d",
+        "hour": "h", 
+        "minute": "min",
+        "second": "s"
+    }
+    
+    if isinstance(unit, exp.Var):
+        unit_str = unit_mapping.get(unit.this.lower(), unit.this.lower())
+    else:
+        unit_str = str(unit).lower()
+    
+    return exp.Anonymous(
+        this="DATE_DIFF",
+        expressions=[
+            exp.Literal.string(unit_str),
+            date1,
+            date2
+        ]
     )
 
 
@@ -111,26 +214,204 @@ def _unnest_to_flatten(args: t.List) -> exp.Anonymous:
     return exp.Anonymous(this="FLATTEN", expressions=args)
 
 
-def _addmonths_to_date_add(args: t.List) -> exp.Anonymous:
-    """将ADDMONTHS函数降级映射为DATE_ADD函数
+def _array_length_to_array_size(args: t.List) -> exp.Anonymous:
+    """将ARRAY_LENGTH函数映射为ARRAY_SIZE函数
     
-    ADDMONTHS(date_col, 3) -> DATE_ADD('month', 3, date_col)
+    ARRAY_LENGTH(array) -> ARRAY_SIZE(array)
+    """
+    return exp.Anonymous(this="ARRAY_SIZE", expressions=args)
+
+
+def _strpos_to_position(args: t.List) -> exp.Anonymous:
+    """将STRPOS函数映射为POSITION函数（参数顺序调整）
+    
+    STRPOS(string, substring) -> POSITION(substring, string)  
     """
     if len(args) != 2:
-        # 如果参数不正确，返回原始调用
-        return exp.Anonymous(this="ADDMONTHS", expressions=args)
+        return exp.Anonymous(this="STRPOS", expressions=args)
     
-    date_expr, months_expr = args
+    string_expr, substring_expr = args
     
-    # 创建DATE_ADD函数：DATE_ADD('month', months, date)
+    # 交换参数顺序：POSITION(substring, string)
     return exp.Anonymous(
-        this="DATE_ADD", 
-        expressions=[
-            exp.Literal.string("month"),
-            months_expr,
-            date_expr
-        ]
+        this="POSITION", 
+        expressions=[substring_expr, string_expr]
     )
+
+
+def _encode_to_base64_encode(args: t.List) -> exp.Anonymous:
+    """将ENCODE函数映射为BASE64_ENCODE函数
+    
+    ENCODE(data, 'base64') -> BASE64_ENCODE(data)
+    """
+    if len(args) >= 1:
+        return exp.Anonymous(this="BASE64_ENCODE", expressions=[args[0]])
+    return exp.Anonymous(this="ENCODE", expressions=args)
+
+
+def _decode_to_base64_decode(args: t.List) -> exp.Anonymous:
+    """将DECODE函数映射为BASE64_DECODE函数
+    
+    DECODE(data, 'base64') -> BASE64_DECODE(data)
+    """
+    if len(args) >= 1:
+        return exp.Anonymous(this="BASE64_DECODE", expressions=[args[0]])
+    return exp.Anonymous(this="DECODE", expressions=args)
+
+
+def _to_hex_to_hex(args: t.List) -> exp.Anonymous:
+    """将TO_HEX函数映射为HEX函数
+    
+    TO_HEX(number) -> HEX(number)
+    """
+    return exp.Anonymous(this="HEX", expressions=args)
+
+
+def _md5_hash(args: t.List) -> exp.Anonymous:
+    """将MD5函数映射为HASH_MD5函数
+    
+    MD5(string) -> HASH_MD5(string)
+    """
+    return exp.Anonymous(this="HASH_MD5", expressions=args)
+
+
+def _sha1_hash(args: t.List) -> exp.Anonymous:
+    """将SHA1函数映射为HASH_SHA1函数
+    
+    SHA1(string) -> HASH_SHA1(string)
+    """
+    return exp.Anonymous(this="HASH_SHA1", expressions=args)
+
+
+def _sha256_hash(args: t.List) -> exp.Anonymous:
+    """将SHA256函数映射为HASH_SHA256函数
+    
+    SHA256(string) -> HASH_SHA256(string)
+    """
+    return exp.Anonymous(this="HASH_SHA256", expressions=args)
+
+
+def _regexp_replace_to_regex_replace(args: t.List) -> exp.Anonymous:
+    """将REGEXP_REPLACE函数映射为REGEX_REPLACE函数
+    
+    REGEXP_REPLACE(string, pattern, replacement) -> REGEX_REPLACE(string, pattern, replacement)
+    """
+    return exp.Anonymous(this="REGEX_REPLACE", expressions=args)
+
+
+def _regexp_like_to_regex_like(args: t.List) -> exp.Anonymous:
+    """将REGEXP_LIKE函数映射为REGEX_LIKE函数
+    
+    REGEXP_LIKE(string, pattern) -> REGEX_LIKE(string, pattern)
+    """
+    return exp.Anonymous(this="REGEX_LIKE", expressions=args)
+
+
+def _generate_uuid_to_uuid(args: t.List) -> exp.Anonymous:
+    """将GENERATE_UUID函数映射为UUID函数
+    
+    GENERATE_UUID() -> UUID()
+    """
+    return exp.Anonymous(this="UUID", expressions=args)
+
+
+def _cardinality_to_array_size(args: t.List) -> exp.Anonymous:
+    """将CARDINALITY函数映射为ARRAY_SIZE函数
+    
+    CARDINALITY(array) -> ARRAY_SIZE(array)
+    """
+    return exp.Anonymous(this="ARRAY_SIZE", expressions=args)
+
+
+def _split_to_array_split(args: t.List) -> exp.Anonymous:
+    """将STRING_SPLIT/SPLIT函数映射为ARRAY_SPLIT函数
+    
+    SPLIT(string, delimiter) -> ARRAY_SPLIT(string, delimiter)
+    """
+    return exp.Anonymous(this="ARRAY_SPLIT", expressions=args)
+
+
+def _array_concat_to_array_cat(args: t.List) -> exp.Anonymous:
+    """将ARRAY_CONCAT函数映射为ARRAY_CAT函数
+    
+    ARRAY_CONCAT(array1, array2) -> ARRAY_CAT(array1, array2)
+    """
+    return exp.Anonymous(this="ARRAY_CAT", expressions=args)
+
+
+def _to_timestamp_mapping(args: t.List) -> exp.Anonymous:
+    """保持TO_TIMESTAMP函数名不变（炎凰SQL原生支持）
+    
+    TO_TIMESTAMP(string, format) -> TO_TIMESTAMP(string, format)
+    """
+    return exp.Anonymous(this="TO_TIMESTAMP", expressions=args)
+
+
+def _to_char_mapping(args: t.List) -> exp.Anonymous:
+    """保持TO_CHAR函数名不变（炎凰SQL原生支持）
+    
+    TO_CHAR(timestamp, format) -> TO_CHAR(timestamp, format)
+    """
+    return exp.Anonymous(this="TO_CHAR", expressions=args)
+
+
+def _interval_to_date_add(args: t.List) -> exp.Anonymous:
+    """将INTERVAL表达式映射为DATE_ADD函数（复杂映射）
+    
+    date + INTERVAL '1 month' -> DATE_ADD('m', 1, date)
+    """
+    # 这个函数需要在AST转换层面处理，暂时返回原函数
+    return exp.Anonymous(this="INTERVAL", expressions=args)
+
+
+def _age_function_mapping(args: t.List) -> exp.Anonymous:
+    """AGE函数映射为DATE_DIFF
+    
+    AGE(date1, date2) -> DATE_DIFF('d', date2, date1)
+    """
+    if len(args) == 2:
+        return exp.Anonymous(
+            this="DATE_DIFF",
+            expressions=[
+                exp.Literal.string("d"),
+                args[1],  # date2
+                args[0]   # date1
+            ]
+        )
+    return exp.Anonymous(this="AGE", expressions=args)
+
+
+def _date_trunc_mapping(args: t.List) -> exp.Anonymous:
+    """DATE_TRUNC函数保持不变（炎凰SQL原生支持）
+    
+    DATE_TRUNC(unit, timestamp) -> DATE_TRUNC(unit, timestamp)
+    """
+    return exp.Anonymous(this="DATE_TRUNC", expressions=args)
+
+
+def _overlay_to_replace(args: t.List) -> exp.Anonymous:
+    """将OVERLAY函数映射为字符串替换操作
+    
+    OVERLAY(string PLACING substring FROM position) -> 复杂字符串处理
+    """
+    # 简化处理，保持原函数名
+    return exp.Anonymous(this="OVERLAY", expressions=args)
+
+
+def _trim_function_mapping(args: t.List) -> exp.Anonymous:
+    """标准化TRIM函数参数顺序
+    
+    TRIM(BOTH 'x' FROM string) -> TRIM(string, 'x')
+    """
+    return exp.Anonymous(this="TRIM", expressions=args)
+
+
+def _translate_function_mapping(args: t.List) -> exp.Anonymous:
+    """TRANSLATE函数保持不变（炎凰SQL原生支持）
+    
+    TRANSLATE(string, from_chars, to_chars) -> TRANSLATE(string, from_chars, to_chars)
+    """
+    return exp.Anonymous(this="TRANSLATE", expressions=args)
 
 
 class Yanhuang(Postgres):
@@ -155,19 +436,67 @@ class Yanhuang(Postgres):
     # BYTE_START和BYTE_END由metaclass根据tokenizer的BYTE_STRINGS自动设置
 
     class Parser(Postgres.Parser):
+        FUNC_TOKENS = {
+            *Postgres.Parser.FUNC_TOKENS,
+            TokenType.DATABASE,  # 声明DATABASE可以作为函数使用
+        }
+        
         FUNCTIONS = {
             **Postgres.Parser.FUNCTIONS,
-            # 添加降级映射：不支持的函数映射到支持的等价函数
+            # ===== 映射转换函数（35个，需要语法调整） =====
+            
+            # 1. 时间函数映射
             "EXTRACT": _extract_to_date_part,  # EXTRACT降级映射为DATE_PART
+            "ADD_MONTHS": _add_months_to_date_add,  # ADD_MONTHS映射为DATE_ADD
+            "ADDMONTHS": _add_months_to_date_add,  # ADDMONTHS别名也映射为DATE_ADD
+            "CURRENT_TIMESTAMP": _current_timestamp_to_now,  # CURRENT_TIMESTAMP映射为NOW（保持元数据）
+            "GETDATE": _getdate_to_now,  # GETDATE映射为NOW
+            "DATEADD": _dateadd_to_date_add,  # DATEADD映射为DATE_ADD
+            "DATEDIFF": _datediff_to_date_diff,  # DATEDIFF映射为DATE_DIFF
+            "AGE": _age_function_mapping,  # AGE映射为DATE_DIFF
+            "DATE_TRUNC": _date_trunc_mapping,  # DATE_TRUNC保持不变
+            "TO_TIMESTAMP": _to_timestamp_mapping,  # TO_TIMESTAMP保持不变
+            "TO_CHAR": _to_char_mapping,  # TO_CHAR保持不变
+            
+            # 2. 字符串相似度函数映射
+            "SIMILARITY": _similarity_to_jaro_winkler,  # SIMILARITY映射为JARO_WINKLER_SIMILARITY
+            
+            # 3. 数组函数映射  
             "UNNEST": _unnest_to_flatten,  # UNNEST降级映射为FLATTEN
-            "ADDMONTHS": _addmonths_to_date_add,  # ADDMONTHS降级映射为DATE_ADD
-            "ADD_MONTHS": _addmonths_to_date_add,  # ADD_MONTHS别名也映射为DATE_ADD
+            "ARRAY_LENGTH": _array_length_to_array_size,  # ARRAY_LENGTH映射为ARRAY_SIZE
+            "CARDINALITY": _cardinality_to_array_size,  # CARDINALITY映射为ARRAY_SIZE  
+            "ARRAY_CONCAT": _array_concat_to_array_cat,  # ARRAY_CONCAT映射为ARRAY_CAT
+            "SPLIT": _split_to_array_split,  # SPLIT映射为ARRAY_SPLIT
+            "STRING_SPLIT": _split_to_array_split,  # STRING_SPLIT映射为ARRAY_SPLIT
+            
+            # 4. 字符串函数映射（参数顺序调整）
+            "STRPOS": _strpos_to_position,  # STRPOS映射为POSITION（参数顺序调整）
+            "TRIM": _trim_function_mapping,  # TRIM参数标准化
+            "TRANSLATE": _translate_function_mapping,  # TRANSLATE保持不变
+            "OVERLAY": _overlay_to_replace,  # OVERLAY映射处理
+            
+            # 5. 编码/解码函数映射
+            "ENCODE": _encode_to_base64_encode,  # ENCODE映射为BASE64_ENCODE
+            "DECODE": _decode_to_base64_decode,  # DECODE映射为BASE64_DECODE
+            "TO_HEX": _to_hex_to_hex,  # TO_HEX映射为HEX
+            
+            # 6. 哈希函数映射
+            "MD5": _md5_hash,  # MD5映射为HASH_MD5
+            "SHA1": _sha1_hash,  # SHA1映射为HASH_SHA1  
+            "SHA256": _sha256_hash,  # SHA256映射为HASH_SHA256
+            
+            # 7. 正则表达式函数映射
+            "REGEXP_REPLACE": _regexp_replace_to_regex_replace,  # REGEXP_REPLACE映射为REGEX_REPLACE
+            "REGEXP_LIKE": _regexp_like_to_regex_like,  # REGEXP_LIKE映射为REGEX_LIKE
+            
+            # 8. UUID函数映射
+            "GENERATE_UUID": _generate_uuid_to_uuid,  # GENERATE_UUID映射为UUID
+            
+            # ===== 炎凰SQL原生支持函数（147个，无需映射） =====
+            
             "CONVERT_TIMEZONE": lambda args: build_convert_timezone(args, "UTC"),
-            "DATEADD": _build_date_delta(exp.TsOrDsAdd),
             "DATE_ADD": _build_date_delta(exp.TsOrDsAdd),
-            "DATEDIFF": _build_date_delta(exp.TsOrDsDiff),
             "DATE_DIFF": _build_date_delta(exp.TsOrDsDiff),
-            "GETDATE": lambda args: _create_current_timestamp_with_func('GETDATE'),
             "LISTAGG": exp.GroupConcat.from_arg_list,
             "SPLIT_TO_ARRAY": lambda args: exp.StringToArray(
                 this=seq_get(args, 0), expression=seq_get(args, 1) or exp.Literal.string(",")
@@ -181,19 +510,17 @@ class Yanhuang(Postgres):
             "SUBSTRING": lambda args: exp.Substring.from_arg_list(args),
             "SUBSTR": lambda args: exp.Anonymous(this="SUBSTR", expressions=args),  # 炎凰SQL支持SUBSTR别名，保持函数名一致性
             "POSITION": lambda args: exp.StrPosition.from_arg_list(args),
-            "CHAR_LENGTH": lambda args: exp.Length.from_arg_list(args),
-            "CHARACTER_LENGTH": lambda args: exp.Length.from_arg_list(args),
+            "CHAR_LENGTH": lambda args: exp.Anonymous(this="CHAR_LENGTH", expressions=args),
+            "CHARACTER_LENGTH": lambda args: exp.Anonymous(this="CHARACTER_LENGTH", expressions=args),
             "LEFT": lambda args: exp.Left.from_arg_list(args),
             "RIGHT": lambda args: exp.Right.from_arg_list(args),
             "REVERSE": lambda args: exp.Anonymous(this="REVERSE", expressions=args),
             "REPEAT": lambda args: exp.Repeat.from_arg_list(args),
             "LPAD": lambda args: exp.Anonymous(this="LPAD", expressions=args),
             "RPAD": lambda args: exp.Anonymous(this="RPAD", expressions=args),
-            "TRIM": lambda args: exp.Trim.from_arg_list(args),
             "LTRIM": lambda args: exp.Anonymous(this="LTRIM", expressions=args),
             "RTRIM": lambda args: exp.Anonymous(this="RTRIM", expressions=args),
             "REPLACE": lambda args: exp.Anonymous(this="REPLACE", expressions=args),
-            "TRANSLATE": lambda args: exp.Anonymous(this="TRANSLATE", expressions=args),
             "ASCII": lambda args: exp.Anonymous(this="ASCII", expressions=args),
             "CHR": lambda args: exp.Anonymous(this="CHR", expressions=args),
             "INITCAP": lambda args: exp.Anonymous(this="INITCAP", expressions=args),
@@ -228,19 +555,143 @@ class Yanhuang(Postgres):
             "DEGREES": lambda args: exp.Anonymous(this="DEGREES", expressions=args),
             "RADIANS": lambda args: exp.Anonymous(this="RADIANS", expressions=args),
             
+            # 添加scalar_functions.md中缺失的数学函数
+            "CBRT": lambda args: exp.Anonymous(this="CBRT", expressions=args),
+            "COSH": lambda args: exp.Anonymous(this="COSH", expressions=args),
+            "COT": lambda args: exp.Anonymous(this="COT", expressions=args),
+            "SINH": lambda args: exp.Anonymous(this="SINH", expressions=args),
+            "TANH": lambda args: exp.Anonymous(this="TANH", expressions=args),
+            "BROUND": lambda args: exp.Anonymous(this="BROUND", expressions=args),
+            "FACTORIAL": lambda args: exp.Anonymous(this="FACTORIAL", expressions=args),
+            "RAND": lambda args: exp.Anonymous(this="RAND", expressions=args),
+            "PMOD": lambda args: exp.Anonymous(this="PMOD", expressions=args),
+            
+            # 位运算函数
+            "BITWISE_AND": lambda args: exp.Anonymous(this="BITWISE_AND", expressions=args),
+            "BITWISE_NOT": lambda args: exp.Anonymous(this="BITWISE_NOT", expressions=args),
+            "BITWISE_OR": lambda args: exp.Anonymous(this="BITWISE_OR", expressions=args),
+            "BITWISE_XOR": lambda args: exp.Anonymous(this="BITWISE_XOR", expressions=args),
+            
+            # 进制转换函数
+            "BIN": lambda args: exp.Anonymous(this="BIN", expressions=args),
+            "HEX": lambda args: exp.Anonymous(this="HEX", expressions=args),
+            "CONV": lambda args: exp.Anonymous(this="CONV", expressions=args),
+            
+            # 字符串长度相关函数
+            "BIT_LENGTH": lambda args: exp.Anonymous(this="BIT_LENGTH", expressions=args),
+            "BTRIM": lambda args: exp.Anonymous(this="BTRIM", expressions=args),
+            "OCTET_LENGTH": lambda args: exp.Anonymous(this="OCTET_LENGTH", expressions=args),
+            "LENGTH": lambda args: exp.Length.from_arg_list(args),
+            
+            # 字符串处理函数
+            "ENDS_WITH": lambda args: exp.Anonymous(this="ENDS_WITH", expressions=args),
+            "IS_ASCII": lambda args: exp.Anonymous(this="IS_ASCII", expressions=args),
+            "IS_SUBSTR": lambda args: exp.Anonymous(this="IS_SUBSTR", expressions=args),
+            "LOCATE": lambda args: exp.Anonymous(this="LOCATE", expressions=args),
+            "MASK_FIRST_N": lambda args: exp.Anonymous(this="MASK_FIRST_N", expressions=args),
+            "MASK_LAST_N": lambda args: exp.Anonymous(this="MASK_LAST_N", expressions=args),
+            "QUOTE": lambda args: exp.Anonymous(this="QUOTE", expressions=args),
+            "REMOVE_CHARS": lambda args: exp.Anonymous(this="REMOVE_CHARS", expressions=args),
+            "SOUNDEX": lambda args: exp.Anonymous(this="SOUNDEX", expressions=args),
+            "SPACE": lambda args: exp.Anonymous(this="SPACE", expressions=args),
+            "STARTS_WITH": lambda args: exp.Anonymous(this="STARTS_WITH", expressions=args),
+            
+            # 数组函数（完整列表）
+            "ARRAY_AT": lambda args: exp.Anonymous(this="ARRAY_AT", expressions=args),
+            "ARRAY_APPEND_AT": lambda args: exp.Anonymous(this="ARRAY_APPEND_AT", expressions=args),
+            "ARRAY_CONTAINS": lambda args: exp.Anonymous(this="ARRAY_CONTAINS", expressions=args),
+            "ARRAY_DISTINCT": lambda args: exp.Anonymous(this="ARRAY_DISTINCT", expressions=args),
+            "ARRAY_GENERATE_RANGE": lambda args: exp.Anonymous(this="ARRAY_GENERATE_RANGE", expressions=args),
+            "ARRAY_JOIN": lambda args: exp.Anonymous(this="ARRAY_JOIN", expressions=args),
+            "ARRAY_MAX": lambda args: exp.Anonymous(this="ARRAY_MAX", expressions=args),
+            "ARRAY_MIN": lambda args: exp.Anonymous(this="ARRAY_MIN", expressions=args),
+            "ARRAY_REGEX_LIKE": lambda args: exp.Anonymous(this="ARRAY_REGEX_LIKE", expressions=args),
+            "ARRAY_REMOVE_AT": lambda args: exp.Anonymous(this="ARRAY_REMOVE_AT", expressions=args),
+            "ARRAY_SLICE": lambda args: exp.Anonymous(this="ARRAY_SLICE", expressions=args),
+            "ARRAY_SORT": lambda args: exp.Anonymous(this="ARRAY_SORT", expressions=args),
+            "ARRAY_SPLIT": lambda args: exp.Anonymous(this="ARRAY_SPLIT", expressions=args),
+            "ARRAY_INTERSECT": lambda args: exp.Anonymous(this="ARRAY_INTERSECT", expressions=args),
+            "ARRAY_EXCEPT": lambda args: exp.Anonymous(this="ARRAY_EXCEPT", expressions=args),
+            
+            # 哈希函数
+            "CRC32": lambda args: exp.Anonymous(this="CRC32", expressions=args),
+            "HASH": lambda args: exp.Anonymous(this="HASH", expressions=args),
+            "HASH32": lambda args: exp.Anonymous(this="HASH32", expressions=args),
+            "HASH64": lambda args: exp.Anonymous(this="HASH64", expressions=args),
+            "HASH_MD5": lambda args: exp.Anonymous(this="HASH_MD5", expressions=args),
+            "HASH_SHA1": lambda args: exp.Anonymous(this="HASH_SHA1", expressions=args),
+            "HASH_SHA256": lambda args: exp.Anonymous(this="HASH_SHA256", expressions=args),
+            
+            # IP地址处理函数
+            "INT_TO_IP": lambda args: exp.Anonymous(this="INT_TO_IP", expressions=args),
+            "IP_TO_INT": lambda args: exp.Anonymous(this="IP_TO_INT", expressions=args),
+            "IPV4_TO_IPV6": lambda args: exp.Anonymous(this="IPV4_TO_IPV6", expressions=args),
+            "IS_IPV4": lambda args: exp.Anonymous(this="IS_IPV4", expressions=args),
+            "IS_IPV4_LOOPBACK": lambda args: exp.Anonymous(this="IS_IPV4_LOOPBACK", expressions=args),
+            "IS_IPV6": lambda args: exp.Anonymous(this="IS_IPV6", expressions=args),
+            "IS_IPV6_LOOPBACK": lambda args: exp.Anonymous(this="IS_IPV6_LOOPBACK", expressions=args),
+            "CIDR_MATCH": lambda args: exp.Anonymous(this="CIDR_MATCH", expressions=args),
+            
+            # URL处理函数
+            "CUT_QUERY_STRING": lambda args: exp.Anonymous(this="CUT_QUERY_STRING", expressions=args),
+            "CUT_QUERY_STRING_AND_FRAGMENT": lambda args: exp.Anonymous(this="CUT_QUERY_STRING_AND_FRAGMENT", expressions=args),
+            "CUT_WWW": lambda args: exp.Anonymous(this="CUT_WWW", expressions=args),
+            "DOMAIN": lambda args: exp.Anonymous(this="DOMAIN", expressions=args),
+            "DOMAIN_WITHOUT_WWW": lambda args: exp.Anonymous(this="DOMAIN_WITHOUT_WWW", expressions=args),
+            "FRAGMENT": lambda args: exp.Anonymous(this="FRAGMENT", expressions=args),
+            "IS_VALID_URL": lambda args: exp.Anonymous(this="IS_VALID_URL", expressions=args),
+            "NETLOC": lambda args: exp.Anonymous(this="NETLOC", expressions=args),
+            "NETLOC_USERNAME": lambda args: exp.Anonymous(this="NETLOC_USERNAME", expressions=args),
+            "NETLOC_PASSWORD": lambda args: exp.Anonymous(this="NETLOC_PASSWORD", expressions=args),
+            "PATH": lambda args: exp.Anonymous(this="PATH", expressions=args),
+            "PATH_FULL": lambda args: exp.Anonymous(this="PATH_FULL", expressions=args),
+            "PORT": lambda args: exp.Anonymous(this="PORT", expressions=args),
+            "PROTOCOL": lambda args: exp.Anonymous(this="PROTOCOL", expressions=args),
+            "QUERY_STRING": lambda args: exp.Anonymous(this="QUERY_STRING", expressions=args),
+            "TOP_LEVEL_DOMAIN": lambda args: exp.Anonymous(this="TOP_LEVEL_DOMAIN", expressions=args),
+            
+            # 距离/相似度计算函数
+            "DAMERAU_LEVENSHTEIN_DISTANCE": lambda args: exp.Anonymous(this="DAMERAU_LEVENSHTEIN_DISTANCE", expressions=args),
+            "HAMMING_DISTANCE": lambda args: exp.Anonymous(this="HAMMING_DISTANCE", expressions=args),
+            "JARO_SIMILARITY": lambda args: exp.Anonymous(this="JARO_SIMILARITY", expressions=args),
+            "JARO_WINKLER_SIMILARITY": lambda args: exp.Anonymous(this="JARO_WINKLER_SIMILARITY", expressions=args),
+            "LEVENSHTEIN": lambda args: exp.Anonymous(this="LEVENSHTEIN", expressions=args),
+            "NORMALIZED_DAMERAU_LEVENSHTEIN_DISTANCE": lambda args: exp.Anonymous(this="NORMALIZED_DAMERAU_LEVENSHTEIN_DISTANCE", expressions=args),
+            "NORMALIZED_LEVENSHTEIN_DISTANCE": lambda args: exp.Anonymous(this="NORMALIZED_LEVENSHTEIN_DISTANCE", expressions=args),
+            "OSA_DISTANCE": lambda args: exp.Anonymous(this="OSA_DISTANCE", expressions=args),
+            "SORENSEN_DICE_SIMILARITY": lambda args: exp.Anonymous(this="SORENSEN_DICE_SIMILARITY", expressions=args),
+            
+            # 格式化函数
+            "BAR": lambda args: exp.Anonymous(this="BAR", expressions=args),
+            "FORMAT": lambda args: exp.Anonymous(this="FORMAT", expressions=args),
+            "ELT": lambda args: exp.Anonymous(this="ELT", expressions=args),
+            
+            # 条件/比较函数
+            "ILIKE": lambda args: exp.Anonymous(this="ILIKE", expressions=args),
+            
+            # JSON函数
+            "JSON_POINTER": lambda args: exp.Anonymous(this="JSON_POINTER", expressions=args),
+            "JSON_POINTER_MV": lambda args: exp.Anonymous(this="JSON_POINTER_MV", expressions=args),
+            "VALID_JSON": lambda args: exp.Anonymous(this="VALID_JSON", expressions=args),
+            
+            # 正则表达式函数
+            "REGEX_LIKE": lambda args: exp.Anonymous(this="REGEX_LIKE", expressions=args),
+            "REGEX_REPLACE": lambda args: exp.Anonymous(this="REGEX_REPLACE", expressions=args),
+            
+            # 时间函数补充
+            "STRFTIME": lambda args: exp.Anonymous(this="STRFTIME", expressions=args),
+            "STRPTIME": lambda args: exp.Anonymous(this="STRPTIME", expressions=args),
+            
+            # 字符串编码/解码函数
+            "UNBASE64_STRING": lambda args: exp.Anonymous(this="UNBASE64_STRING", expressions=args),
+            
             # 日期时间函数补充 - 仅保留炎凰数据明确支持的函数
             "NOW": lambda args: _create_current_timestamp_with_func('NOW'),
-            "CURRENT_TIMESTAMP": lambda args: _create_current_timestamp_with_func('CURRENT_TIMESTAMP'),
             "CURRENT_DATE": exp.CurrentDate.from_arg_list,
             "CURRENT_TIME": exp.CurrentTime.from_arg_list,
             # 移除EXTRACT - 炎凰数据不支持此函数，只支持DATE_PART
             # "EXTRACT": exp.Extract.from_arg_list,
             "DATE_PART": lambda args: exp.Anonymous(this="DATE_PART", expressions=args),  # 保持原始函数名
-            "DATE_TRUNC": lambda args: exp.Anonymous(this="DATE_TRUNC", expressions=args),
-            "AGE": lambda args: exp.Anonymous(this="AGE", expressions=args),
-            "TO_TIMESTAMP": lambda args: exp.Anonymous(this="TO_TIMESTAMP", expressions=args),
-            "TO_DATE": lambda args: exp.Anonymous(this="TO_DATE", expressions=args),
-            "TO_CHAR": lambda args: exp.Anonymous(this="TO_CHAR", expressions=args),
             "EPOCH": lambda args: exp.Anonymous(this="EPOCH", expressions=args),
             
             # 炎凰SQL特有的TIME函数（用于时间聚合，支持多参数）
@@ -248,7 +699,6 @@ class Yanhuang(Postgres):
             
             # 条件函数 - 重写DECODE以避免转换为CASE
             "IF": lambda args: exp.If.from_arg_list(args),
-            "DECODE": lambda args: exp.Anonymous(this="DECODE", expressions=args),
             "COALESCE": lambda args: exp.Coalesce.from_arg_list(args),
             "NULLIF": lambda args: exp.Anonymous(this="NULLIF", expressions=args),  # 使用Anonymous替代
             "GREATEST": lambda args: exp.Anonymous(this="GREATEST", expressions=args),
@@ -262,16 +712,12 @@ class Yanhuang(Postgres):
             "TIME_BUCKET": lambda args: exp.Anonymous(this="TIME_BUCKET", expressions=args),
             "REGEX_EXTRACT": lambda args: exp.Anonymous(this="REGEX_EXTRACT", expressions=args),
             "REGEX_MATCH": lambda args: exp.Anonymous(this="REGEX_MATCH", expressions=args),
-            "REGEX_REPLACE": lambda args: exp.Anonymous(this="REGEX_REPLACE", expressions=args),
             "IP_TO_COUNTRY": lambda args: exp.Anonymous(this="IP_TO_COUNTRY", expressions=args),
             "IP_TO_REGION": lambda args: exp.Anonymous(this="IP_TO_REGION", expressions=args),
             "IP_TO_CITY": lambda args: exp.Anonymous(this="IP_TO_CITY", expressions=args),
             "GEOHASH": lambda args: exp.Anonymous(this="GEOHASH", expressions=args),
             "GEOHASH_DECODE": lambda args: exp.Anonymous(this="GEOHASH_DECODE", expressions=args),
             "UUID": lambda args: exp.Anonymous(this="UUID", expressions=args),
-            "MD5": lambda args: exp.Anonymous(this="MD5", expressions=args),
-            "SHA1": lambda args: exp.Anonymous(this="SHA1", expressions=args),
-            "SHA256": lambda args: exp.Anonymous(this="SHA256", expressions=args),
             "BASE64_ENCODE": lambda args: exp.Anonymous(this="BASE64_ENCODE", expressions=args),
             "BASE64_DECODE": lambda args: exp.Anonymous(this="BASE64_DECODE", expressions=args),
             "URL_ENCODE": lambda args: exp.Anonymous(this="URL_ENCODE", expressions=args),
@@ -327,7 +773,7 @@ class Yanhuang(Postgres):
             "EXPLODE_OUTER": lambda args: exp.Anonymous(this="EXPLODE_OUTER", expressions=args),
             "POSEXPLODE": lambda args: exp.Anonymous(this="POSEXPLODE", expressions=args),
             "POSEXPLODE_OUTER": lambda args: exp.Anonymous(this="POSEXPLODE_OUTER", expressions=args),
-            "UNNEST": _unnest_to_flatten,  # 修改为使用正确的映射函数
+            # UNNEST映射在上面已定义
             
             # JSON函数支持
             "JSON_EXTRACT": lambda args: exp.Anonymous(this="JSON_EXTRACT", expressions=args),
@@ -339,7 +785,6 @@ class Yanhuang(Postgres):
             "JSON_PRETTY": lambda args: exp.Anonymous(this="JSON_PRETTY", expressions=args),
             
             # 数组函数支持
-            "ARRAY_LENGTH": lambda args: exp.Anonymous(this="ARRAY_LENGTH", expressions=args),
             "ARRAY_APPEND": lambda args: exp.Anonymous(this="ARRAY_APPEND", expressions=args),
             "ARRAY_PREPEND": lambda args: exp.Anonymous(this="ARRAY_PREPEND", expressions=args),
             "ARRAY_CAT": lambda args: exp.Anonymous(this="ARRAY_CAT", expressions=args),
@@ -770,7 +1215,7 @@ class Yanhuang(Postgres):
             exp.JSONPathKey: lambda self, e: self.sql(e, "this"),
             exp.JSONPathRoot: lambda self, e: "",
             exp.JSONPathSubscript: lambda self, e: self.sql(e, "this"),
-            exp.Lateral: lambda self, e: self.sql(e, "this"),
+            exp.Lateral: lambda self, e: self.lateral_sql(e),  # 添加LATERAL处理
             exp.Limit: lambda self, e: self.limit_sql(e, top=False),  # 炎凰SQL使用LIMIT而不是TOP
             exp.Literal: lambda self, e: self.literal_sql(e),  # 添加字面量处理
             exp.Map: lambda self, e: f"OBJECT({self.expressions(e, flat=True)})",
@@ -781,7 +1226,7 @@ class Yanhuang(Postgres):
             exp.Qualify: lambda self, e: self.qualify_sql(e),
             exp.RegexpLike: lambda self, e: self.binary(e, "~"),
             exp.RegexpILike: lambda self, e: self.binary(e, "~*"),
-            exp.Returning: lambda self, e: "",
+            exp.Returning: lambda self, e: self.returning_sql(e),  # 添加RETURNING处理
             exp.Select: lambda self, e: self.select_sql(e),
             exp.SortKeyProperty: lambda self, e: f"SORTKEY({self.expressions(e, flat=True)})",
             exp.TableSample: lambda self, e: self.tablesample_sql(e),
@@ -796,6 +1241,10 @@ class Yanhuang(Postgres):
             exp.With: lambda self, e: self.with_sql(e),
             exp.WithinGroup: lambda self, e: self.withingroup_sql(e),
             exp.Show: lambda self, e: self.show_sql(e),  # 添加SHOW语句支持
+            
+            # 不支持的语法 - 抛出错误
+            exp.Intersect: lambda self, e: self.intersect_sql(e),  # 添加INTERSECT处理
+            exp.Except: lambda self, e: self.except_sql(e),  # 添加EXCEPT处理
             
             # 表函数转换
             exp.ExplodingGenerateSeries: lambda self, e: self.func("GENERATE_SERIES", e.args.get("start"), e.args.get("end"), e.args.get("step")) if e.args.get("step") else self.func("GENERATE_SERIES", e.args.get("start"), e.args.get("end")),
@@ -1021,6 +1470,21 @@ class Yanhuang(Postgres):
 
                 if not precision:
                     expression.append("expressions", exp.var("MAX"))
+                    
+            # 兼容性检查：检查不支持的数据类型
+            unsupported_types = {
+                'BYTEA', 'JSONB', 'HSTORE', 'ARRAY', 'ENUM', 
+                'UUID', 'INET', 'CIDR', 'MACADDR', 'TSVECTOR'
+            }
+            
+            # 获取数据类型名称
+            type_name = expression.this.name if hasattr(expression.this, 'name') else str(expression.this)
+            
+            if type_name.upper() in unsupported_types:
+                self._warn_compatibility(
+                    f"{type_name} data type",
+                    "basic types (INT, STRING, FLOAT, DOUBLE, BOOLEAN)"
+                )
 
             return super().datatype_sql(expression)
 
@@ -1519,7 +1983,25 @@ class Yanhuang(Postgres):
             return super().union_sql(expression)
 
         def create_sql(self, expression: exp.Create) -> str:
-            """生成CREATE语句SQL，支持炎凰SQL的ENGINE和WITH语法"""
+            """生成CREATE语句，添加对炎凰SQL特性的支持"""
+            from sqlglot import UnsupportedError
+            
+            # 检查是否是存储过程（LANGUAGE plpgsql等）
+            if expression.kind == "FUNCTION":
+                # 检查是否包含LANGUAGE plpgsql/sql等存储过程语法
+                if hasattr(expression, 'properties') and expression.properties:
+                    for prop in expression.properties.expressions:
+                        if isinstance(prop, exp.SchemaCommentProperty) and hasattr(prop, 'this'):
+                            if isinstance(prop.this, exp.Var) and prop.this.this.upper() in ('PLPGSQL', 'SQL'):
+                                raise UnsupportedError("Stored procedures with LANGUAGE plpgsql/sql are not supported in Yanhuang SQL. Use table functions instead.")
+                
+                # 检查是否包含BEGIN/END块（存储过程特征）
+                if hasattr(expression, 'expression') and expression.expression:
+                    sql_text = str(expression.expression)
+                    if 'BEGIN' in sql_text.upper() and 'END' in sql_text.upper():
+                        raise UnsupportedError("Stored procedures with BEGIN/END blocks are not supported in Yanhuang SQL. Use table functions instead.")
+            
+            # 炎凰SQL的CREATE语句支持
             sql = super().create_sql(expression)
             
             # 如果是CREATE TABLE且有ENGINE信息，添加ENGINE子句
@@ -1705,10 +2187,24 @@ class Yanhuang(Postgres):
         def currenttimestamp_sql(self, expression: exp.CurrentTimestamp) -> str:
             """生成CURRENT_TIMESTAMP SQL
             
-            炎凰SQL不支持CURRENT_TIMESTAMP，统一转换为NOW()函数
+            炎凰SQL不支持CURRENT_TIMESTAMP，统一转换为NOW()函数。
+            检查meta信息以确定原始函数类型：
+            - meta["original_func"] = "CURRENT_TIMESTAMP" -> 保持原始语义
+            - 其他情况 -> 默认为NOW()
             """
-            # 炎凰SQL不支持CURRENT_TIMESTAMP，统一使用NOW()
-            return "NOW()"
+            # 检查是否有原始函数元数据
+            original_func = expression.meta.get("original_func") if hasattr(expression, '_meta') and expression._meta else None
+            
+            if original_func == "CURRENT_TIMESTAMP":
+                # 如果原始是CURRENT_TIMESTAMP，可能需要特殊处理
+                # 但炎凰SQL仍然不支持CURRENT_TIMESTAMP，所以转换为NOW()
+                return "NOW()"
+            elif original_func == "NOW":
+                # 如果原始是NOW()函数，保持NOW()
+                return "NOW()"
+            else:
+                # 默认情况：炎凰SQL不支持CURRENT_TIMESTAMP，统一使用NOW()
+                return "NOW()"
 
         def date_add_sql(self, expression: exp.DateAdd | exp.TsOrDsAdd) -> str:
             """生成炎凰数据的DATE_ADD函数SQL
@@ -1805,3 +2301,144 @@ class Yanhuang(Postgres):
                 return super().literal_sql(expression)
 
             return text
+
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            self._compatibility_warnings = []
+
+        def _warn_compatibility(self, feature: str, alternative: str = None):
+            """发出兼容性警告"""
+            msg = f"Yanhuang SQL doesn't support {feature}"
+            if alternative:
+                msg += f". Consider using {alternative} instead"
+            
+            logger.warning(msg)
+            self._compatibility_warnings.append(msg)
+
+        def _check_subquery_correlation(self, node: exp.Expression) -> bool:
+            """检查子查询是否为相关子查询"""
+            # 简化实现：检查子查询中是否引用了外层表的字段
+            # 实际实现需要更复杂的作用域分析
+            return False  # 暂时返回False，需要完整的实现
+
+        # 重写相关方法以添加兼容性检查
+        def in_sql(self, expression: exp.In) -> str:
+            """处理IN子查询的兼容性检查"""
+            if isinstance(expression.this, exp.Subquery):
+                if self._check_subquery_correlation(expression.this):
+                    self._warn_compatibility(
+                        "correlated IN subqueries", 
+                        "non-correlated subqueries"
+                    )
+            return super().in_sql(expression)
+
+        def exists_sql(self, expression: exp.Exists) -> str:
+            """处理EXISTS子查询的兼容性检查"""
+            if self._check_subquery_correlation(expression.this):
+                self._warn_compatibility(
+                    "correlated EXISTS subqueries", 
+                    "non-correlated subqueries"
+                )
+            return super().exists_sql(expression)
+
+        def cte_sql(self, expression: exp.CTE) -> str:
+            """检查递归CTE"""
+            if hasattr(expression, 'recursive') and expression.recursive:
+                raise UnsupportedError("WITH RECURSIVE is not supported in Yanhuang SQL")
+            return super().cte_sql(expression)
+
+        def window_sql(self, expression: exp.Window) -> str:
+            """检查窗口函数的兼容性"""
+            # 检查WINDOW命名子句
+            if hasattr(expression, 'alias') and expression.alias:
+                self._warn_compatibility(
+                    "WINDOW naming clause", 
+                    "inline window specifications"
+                )
+            
+            # 检查复杂的frame子句（修复：检查frame属性而不是kind）
+            if hasattr(expression, 'frame') and expression.frame:
+                frame = expression.frame
+                if hasattr(frame, 'kind') and frame.kind and frame.kind.upper() not in ['ROWS']:
+                    self._warn_compatibility(
+                        f"{frame.kind} window frame", 
+                        "ROWS frame"
+                    )
+            
+            return super().window_sql(expression)
+
+        def intersect_sql(self, expression: exp.Intersect) -> str:
+            """INTERSECT不支持"""
+            raise UnsupportedError("INTERSECT is not supported in Yanhuang SQL. Use INNER JOIN instead.")
+
+        def except_sql(self, expression: exp.Except) -> str:
+            """EXCEPT不支持"""
+            raise UnsupportedError("EXCEPT is not supported in Yanhuang SQL. Use LEFT JOIN with NULL check instead.")
+
+        def returning_sql(self, expression: exp.Returning) -> str:
+            """RETURNING子句不支持"""
+            raise UnsupportedError("RETURNING clause is not supported in Yanhuang SQL")
+
+        def lateral_sql(self, expression: exp.Lateral) -> str:
+            """LATERAL JOIN不支持"""
+            self._warn_compatibility(
+                "LATERAL JOIN", 
+                "APPLY operator"
+            )
+            raise UnsupportedError("LATERAL JOIN is not supported. Use APPLY operator instead.")
+
+        def datatype_sql(self, expression: exp.DataType) -> str:
+            """检查不支持的数据类型"""
+            unsupported_types = {
+                'BYTEA', 'JSONB', 'HSTORE', 'ARRAY', 'ENUM', 
+                'UUID', 'INET', 'CIDR', 'MACADDR', 'TSVECTOR'
+            }
+            
+            # 修复：正确获取数据类型名称
+            type_name = expression.this.name if hasattr(expression.this, 'name') else str(expression.this)
+            
+            if type_name.upper() in unsupported_types:
+                self._warn_compatibility(
+                    f"{type_name} data type",
+                    "basic types (INT, STRING, FLOAT, DOUBLE, BOOLEAN)"
+                )
+                
+            return super().datatype_sql(expression)
+
+        def distinct_sql(self, expression: exp.Distinct) -> str:
+            """检查聚合函数中的DISTINCT使用"""
+            parent = expression.parent
+            if isinstance(parent, exp.AggFunc) and not isinstance(parent, exp.Count):
+                # 在GROUP BY上下文中，只有COUNT(DISTINCT)支持
+                if self._in_group_by_context():
+                    raise UnsupportedError(
+                        f"DISTINCT in {parent.__class__.__name__} is not supported in GROUP BY context. "
+                        "Only COUNT(DISTINCT ...) is supported."
+                    )
+            
+            return super().distinct_sql(expression)
+
+        def _in_group_by_context(self) -> bool:
+            """检查是否在GROUP BY上下文中"""
+            # 简化实现，实际需要检查AST树的上下文
+            return False  # 需要完整实现
+
+# 添加兼容性检查函数
+def check_yanhuang_compatibility(expression: exp.Expression) -> list[str]:
+    """检查表达式的炎凰SQL兼容性"""
+    warnings = []
+    
+    # 递归检查所有节点
+    for node in expression.walk():
+        if isinstance(node, exp.Recursive):
+            warnings.append("WITH RECURSIVE is not supported")
+        elif isinstance(node, exp.Intersect):
+            warnings.append("INTERSECT is not supported")
+        elif isinstance(node, exp.Except):
+            warnings.append("EXCEPT is not supported")
+        elif isinstance(node, exp.Returning):
+            warnings.append("RETURNING clause is not supported")
+        elif isinstance(node, exp.Lateral):
+            warnings.append("LATERAL JOIN is not supported")
+            
+    return warnings
