@@ -1184,14 +1184,13 @@ class Yanhuang(Postgres):
             **Postgres.Generator.TYPE_MAPPING,
             exp.DataType.Type.BINARY: "VARBYTE",
             exp.DataType.Type.BLOB: "VARBYTE",
-            exp.DataType.Type.INT: "INT",  # 使用INT而不是INTEGER
-            exp.DataType.Type.TEXT: "STRING",  # 使用STRING而不是TEXT
+            exp.DataType.Type.INT: "INTEGER",
             exp.DataType.Type.TIMETZ: "TIME",
             exp.DataType.Type.TIMESTAMPTZ: "TIMESTAMP",
             exp.DataType.Type.VARBINARY: "VARBYTE",
             exp.DataType.Type.ROWVERSION: "VARBYTE",
             exp.DataType.Type.FLOAT: "FLOAT",
-            exp.DataType.Type.DOUBLE: "DOUBLE",  # 保持DOUBLE类型不变
+            exp.DataType.Type.DOUBLE: "DOUBLE",
             exp.DataType.Type.DECIMAL: "DECIMAL",
             exp.DataType.Type.BOOLEAN: "BOOLEAN",
         }
@@ -1210,7 +1209,7 @@ class Yanhuang(Postgres):
             exp.Delete: lambda self, e: self.delete_sql(e),
             exp.DistKeyProperty: lambda self, e: self.func("DISTKEY", e.this),
             exp.DistStyleProperty: lambda self, e: self.naked_property(e),
-            exp.Explode: lambda self, e: "FLATTEN(" + self.sql(e, "this") + ")",
+            exp.Explode: lambda self, e: self.func("EXPLODE", e.this),
             exp.GeneratedAsIdentityColumnConstraint: generatedasidentitycolumnconstraint_sql,
             exp.GroupConcat: lambda self, e: self.func("STRING_AGG", e.this, e.args.get("separator")),
             exp.JSONExtract: lambda self, e: json_extract_segments("JSON_EXTRACT_PATH_TEXT")(self, e),
