@@ -126,6 +126,40 @@ def _current_timestamp_to_now(args: t.List) -> exp.Anonymous:
     return now_func
 
 
+def _current_time_to_strftime(args: t.List) -> exp.Anonymous:
+    """将CURRENT_TIME映射为STRFTIME函数获取带时区的TIME值
+    
+    CURRENT_TIME -> STRFTIME(NOW(), '%H:%M:%S%z')
+    """
+    strftime_func = exp.Anonymous(
+        this="STRFTIME", 
+        expressions=[
+            exp.Anonymous(this="NOW", expressions=[]),
+            exp.Literal.string("%H:%M:%S%z")
+        ]
+    )
+    # 保存原始函数名到meta
+    strftime_func.meta["original_func"] = "CURRENT_TIME"
+    return strftime_func
+
+
+def _localtime_to_strftime(args: t.List) -> exp.Anonymous:
+    """将LOCALTIME映射为STRFTIME函数获取不带时区的TIME值
+    
+    LOCALTIME -> STRFTIME(NOW(), '%H:%M:%S')
+    """
+    strftime_func = exp.Anonymous(
+        this="STRFTIME", 
+        expressions=[
+            exp.Anonymous(this="NOW", expressions=[]),
+            exp.Literal.string("%H:%M:%S")
+        ]
+    )
+    # 保存原始函数名到meta
+    strftime_func.meta["original_func"] = "LOCALTIME"
+    return strftime_func
+
+
 def _getdate_to_now(args: t.List) -> exp.Anonymous:
     """将GETDATE函数映射为NOW函数
     
@@ -134,6 +168,22 @@ def _getdate_to_now(args: t.List) -> exp.Anonymous:
     now_func = exp.Anonymous(this="NOW", expressions=args)
     now_func.meta["original_func"] = "GETDATE"
     return now_func
+
+
+def _time_to_str_mapping(args: t.List) -> exp.Anonymous:
+    """将TimeToStr映射为STRFTIME函数
+    
+    TimeToStr(timestamp, format) -> STRFTIME(timestamp, format)
+    """
+    return exp.Anonymous(this="STRFTIME", expressions=args)
+
+
+def _str_to_time_mapping(args: t.List) -> exp.Anonymous:
+    """将StrToTime映射为STRPTIME函数
+    
+    StrToTime(string, format) -> STRPTIME(string, format)
+    """
+    return exp.Anonymous(this="STRPTIME", expressions=args)
 
 
 def _dateadd_to_date_add(args: t.List) -> exp.Anonymous:
@@ -338,21 +388,39 @@ def _array_concat_to_array_cat(args: t.List) -> exp.Anonymous:
     """
     return exp.Anonymous(this="ARRAY_CAT", expressions=args)
 
-
-def _to_timestamp_mapping(args: t.List) -> exp.Anonymous:
-    """保持TO_TIMESTAMP函数名不变（炎凰SQL原生支持）
+def _array_to_string_to_array_join(args: t.List) -> exp.Anonymous:
+    """将ARRAY_TO_STRING函数映射为ARRAY_JOIN函数
     
-    TO_TIMESTAMP(string, format) -> TO_TIMESTAMP(string, format)
+    ARRAY_TO_STRING(array, separator) -> ARRAY_JOIN(array, separator)
+    ARRAY_TO_STRING(array, separator, null_text) -> ARRAY_JOIN(array, separator)  # 炎凰SQL的ARRAY_JOIN不支持null_text参数
     """
-    return exp.Anonymous(this="TO_TIMESTAMP", expressions=args)
+    # 只取前两个参数，忽略可能的第三个null_text参数
+    main_args = args[:2] if len(args) >= 2 else args
+    return exp.Anonymous(this="ARRAY_JOIN", expressions=main_args)
 
 
-def _to_char_mapping(args: t.List) -> exp.Anonymous:
-    """保持TO_CHAR函数名不变（炎凰SQL原生支持）
+def _to_timestamp_mapping(args: t.List) -> exp.StrToTime:
+    """将TO_TIMESTAMP映射为StrToTime表达式以便后续转换
     
-    TO_CHAR(timestamp, format) -> TO_CHAR(timestamp, format)
+    TO_TIMESTAMP(string, format) -> StrToTime(string, format)
     """
-    return exp.Anonymous(this="TO_CHAR", expressions=args)
+    if len(args) >= 2:
+        return exp.StrToTime(this=args[0], format=args[1])
+    elif len(args) == 1:
+        return exp.StrToTime(this=args[0])
+    return exp.StrToTime()
+
+
+def _to_char_mapping(args: t.List) -> exp.TimeToStr:
+    """将TO_CHAR映射为TimeToStr表达式以便后续转换
+    
+    TO_CHAR(timestamp, format) -> TimeToStr(timestamp, format)
+    """
+    if len(args) >= 2:
+        return exp.TimeToStr(this=args[0], format=args[1])
+    elif len(args) == 1:
+        return exp.TimeToStr(this=args[0])
+    return exp.TimeToStr()
 
 
 def _interval_to_date_add(args: t.List) -> exp.Anonymous:
@@ -414,6 +482,460 @@ def _translate_function_mapping(args: t.List) -> exp.Anonymous:
     return exp.Anonymous(this="TRANSLATE", expressions=args)
 
 
+def _bool_and_to_min_case(args: t.List) -> exp.Case:
+    """将BOOL_AND函数映射为MIN + CASE表达式
+    
+    BOOL_AND(expr) -> (MIN(CASE WHEN expr THEN 1 ELSE 0 END) = 1)
+    
+    炎凰数据不支持BOOL_AND，但可以通过复合映射实现相同语义
+    """
+    if len(args) != 1:
+        return exp.Anonymous(this="BOOL_AND", expressions=args)
+    
+    # 构建 CASE WHEN expr THEN 1 ELSE 0 END
+    case_expr = exp.Case(
+        ifs=[exp.If(this=args[0], true=exp.Literal.number("1"))],
+        default=exp.Literal.number("0")
+    )
+    
+    # 构建 MIN(CASE ...) = 1 的表达式
+    min_func = exp.Anonymous(this="MIN", expressions=[case_expr])
+    return exp.EQ(this=min_func, expression=exp.Literal.number("1"))
+
+
+def _bool_or_to_max_case(args: t.List) -> exp.Case:
+    """将BOOL_OR函数映射为MAX + CASE表达式
+    
+    BOOL_OR(expr) -> (MAX(CASE WHEN expr THEN 1 ELSE 0 END) = 1)
+    
+    炎凰数据不支持BOOL_OR，但可以通过复合映射实现相同语义
+    """
+    if len(args) != 1:
+        return exp.Anonymous(this="BOOL_OR", expressions=args)
+    
+    # 构建 CASE WHEN expr THEN 1 ELSE 0 END
+    case_expr = exp.Case(
+        ifs=[exp.If(this=args[0], true=exp.Literal.number("1"))],
+        default=exp.Literal.number("0")
+    )
+    
+    # 构建 MAX(CASE ...) = 1 的表达式
+    max_func = exp.Anonymous(this="MAX", expressions=[case_expr])
+    return exp.EQ(this=max_func, expression=exp.Literal.number("1"))
+
+
+def _percent_rank_to_row_number(args: t.List) -> exp.Div:
+    """将PERCENT_RANK窗口函数映射为ROW_NUMBER + COUNT的复合表达式
+    
+    PERCENT_RANK() OVER (...) -> (ROW_NUMBER() OVER (...) - 1) / (COUNT(*) OVER (...) - 1)
+    
+    炎凰数据不支持PERCENT_RANK，但可以通过复合映射实现相同语义
+    返回除法表达式，窗口子句将在上层处理时自动应用
+    """
+    # 构建 ROW_NUMBER() - 1，用括号包围确保优先级
+    row_number_func = exp.Anonymous(this="ROW_NUMBER", expressions=[])
+    row_number_minus_1 = exp.Paren(
+        this=exp.Sub(
+            this=row_number_func,
+            expression=exp.Literal.number("1")
+        )
+    )
+    
+    # 构建 COUNT(*) - 1，用括号包围确保优先级  
+    count_func = exp.Anonymous(this="COUNT", expressions=[exp.Star()])
+    count_minus_1 = exp.Paren(
+        this=exp.Sub(
+            this=count_func,
+            expression=exp.Literal.number("1")
+        )
+    )
+    
+    # 构建除法表达式: (ROW_NUMBER() - 1) / (COUNT(*) - 1)
+    return exp.Div(
+        this=row_number_minus_1,
+        expression=count_minus_1
+    )
+
+
+# =============================================================================
+# 高优先级虚继承函数映射（第七批优化）
+# =============================================================================
+
+def _time_to_unix_mapping(args: t.List) -> exp.Anonymous:
+    """将TimeToUnix映射为DATE_PART('epoch', timestamp)"""
+    if len(args) >= 1:
+        return exp.Anonymous(
+            this="DATE_PART",
+            expressions=[
+                exp.Literal.string("epoch"),
+                args[0]
+            ]
+        )
+    return exp.Anonymous(this="DATE_PART", expressions=[exp.Literal.string("epoch"), exp.Anonymous(this="NOW")])
+
+def _str_position_mapping(args: t.List) -> exp.Anonymous:
+    """将StrPosition映射为POSITION函数（修正参数顺序）"""
+    if len(args) >= 2:
+        # STRPOS(string, substring) -> POSITION(substring, string)
+        # 调整参数顺序：第一个参数是string，第二个是substring
+        string_expr = args[0]
+        substring_expr = args[1]
+        return exp.Anonymous(
+            this="POSITION",
+            expressions=[substring_expr, string_expr]  # substring, string
+        )
+    return exp.Anonymous(this="POSITION", expressions=args)
+
+def _count_if_to_sum_case(args: t.List) -> exp.Sum:
+    """将CountIf映射为SUM(CASE WHEN condition THEN 1 ELSE 0 END)"""
+    if len(args) >= 1:
+        condition = args[0]
+        case_expr = exp.Case(
+            ifs=[
+                exp.If(
+                    this=condition,
+                    true=exp.Literal.number("1")
+                )
+            ],
+            default=exp.Literal.number("0")
+        )
+        return exp.Sum(this=case_expr)
+    return exp.Sum(this=exp.Literal.number("0"))
+
+def _rand_to_random(args: t.List) -> exp.Anonymous:
+    """将Rand映射为RANDOM函数"""
+    # PostgreSQL的RANDOM()函数在炎凰SQL中也支持
+    return exp.Anonymous(this="RANDOM", expressions=args)
+
+def _unicode_to_ascii(args: t.List) -> exp.Anonymous:
+    """将Unicode映射为ASCII函数"""
+    # PostgreSQL的ASCII函数在炎凰SQL中也支持
+    return exp.Anonymous(this="ASCII", expressions=args)
+
+def _timestamp_trunc_mapping(args: t.List) -> exp.Anonymous:
+    """将TimestampTrunc映射为DATE_TRUNC函数"""
+    if len(args) >= 2:
+        # PostgreSQL: DATE_TRUNC(field, source [, time_zone])
+        # 炎凰SQL: DATE_TRUNC(field, source)
+        field = args[0]
+        source = args[1]
+        
+        # 如果有时区参数，暂时忽略（炎凰SQL可能不支持时区参数）
+        return exp.Anonymous(
+            this="DATE_TRUNC",
+            expressions=[field, source]
+        )
+    return exp.Anonymous(this="DATE_TRUNC", expressions=args)
+
+def _date_sub_mapping(args: t.List) -> exp.Anonymous:
+    """将DateSub映射为DATE_ADD的负数形式"""
+    if len(args) >= 3:
+        # DateSub(date, interval, unit) -> DATE_ADD(unit, -interval, date)
+        date_expr = args[0]
+        interval_expr = args[1]
+        unit_expr = args[2]
+        
+        # 创建负数间隔
+        negative_interval = exp.Neg(this=interval_expr)
+        
+        return exp.Anonymous(
+            this="DATE_ADD",
+            expressions=[unit_expr, negative_interval, date_expr]
+        )
+    elif len(args) >= 2:
+        # 简化形式：DateSub(date, interval) -> DATE_ADD('day', -interval, date)
+        date_expr = args[0]
+        interval_expr = args[1]
+        
+        negative_interval = exp.Neg(this=interval_expr)
+        
+        return exp.Anonymous(
+            this="DATE_ADD",
+            expressions=[exp.Literal.string("day"), negative_interval, date_expr]
+        )
+    return exp.Anonymous(this="DATE_ADD", expressions=args)
+
+def _uuid_to_uuid_func(args: t.List) -> exp.Anonymous:
+    """将Uuid映射为UUID函数"""
+    # PostgreSQL的GEN_RANDOM_UUID()在炎凰SQL中映射为UUID()
+    return exp.Anonymous(this="UUID", expressions=args)
+
+def _current_user_mapping(args: t.List) -> exp.Anonymous:
+    """将CurrentUser映射为USER函数"""
+    # PostgreSQL的CURRENT_USER在炎凰SQL中映射为USER()
+    return exp.Anonymous(this="USER", expressions=args)
+
+
+def _make_time_mapping(args: t.List) -> exp.Anonymous:
+    """将MAKE_TIME映射为STRPTIME + CONCAT组合
+    
+    MAKE_TIME(hour, minute, second) -> STRPTIME(CONCAT(LPAD(CAST(hour AS STRING), 2, '0'), ':', LPAD(CAST(minute AS STRING), 2, '0'), ':', LPAD(CAST(second AS STRING), 2, '0')), '%H:%M:%S')
+    """
+    if len(args) != 3:
+        return exp.Anonymous(this="MAKE_TIME", expressions=args)
+    
+    hour, minute, second = args
+    
+    # 构建时间字符串：HH:MM:SS
+    hour_str = exp.Anonymous(
+        this="LPAD",
+        expressions=[
+            exp.Cast(this=hour, to=exp.DataType.build("STRING")),
+            exp.Literal.number("2"),
+            exp.Literal.string("0")
+        ]
+    )
+    
+    minute_str = exp.Anonymous(
+        this="LPAD", 
+        expressions=[
+            exp.Cast(this=minute, to=exp.DataType.build("STRING")),
+            exp.Literal.number("2"),
+            exp.Literal.string("0")
+        ]
+    )
+    
+    second_str = exp.Anonymous(
+        this="LPAD",
+        expressions=[
+            exp.Cast(this=second, to=exp.DataType.build("STRING")),
+            exp.Literal.number("2"),
+            exp.Literal.string("0")
+        ]
+    )
+    
+    # 拼接时间字符串
+    time_string = exp.Anonymous(
+        this="CONCAT",
+        expressions=[
+            hour_str,
+            exp.Literal.string(":"),
+            minute_str,
+            exp.Literal.string(":"),
+            second_str
+        ]
+    )
+    
+    # 使用STRPTIME解析
+    return exp.Anonymous(
+        this="STRPTIME",
+        expressions=[time_string, exp.Literal.string("%H:%M:%S")]
+    )
+
+
+def _str_to_date_mapping(args: t.List) -> exp.Anonymous:
+    """将STR_TO_DATE映射为CAST(STRPTIME(...) AS DATE)
+    
+    STR_TO_DATE(string, format) -> CAST(STRPTIME(string, format) AS DATE)
+    """
+    if len(args) != 2:
+        return exp.Anonymous(this="STR_TO_DATE", expressions=args)
+    
+    string_expr, format_expr = args
+    
+    # 使用STRPTIME解析，然后CAST为DATE
+    strptime_expr = exp.Anonymous(
+        this="STRPTIME",
+        expressions=[string_expr, format_expr]
+    )
+    
+    return exp.Cast(this=strptime_expr, to=exp.DataType.build("DATE"))
+
+
+def _str_to_time_mapping_fixed(args: t.List) -> exp.Anonymous:
+    """将STR_TO_TIME映射为CAST(STRPTIME(...) AS TIME)
+    
+    STR_TO_TIME(string, format) -> CAST(STRPTIME(string, format) AS TIME)
+    """
+    if len(args) != 2:
+        return exp.Anonymous(this="STR_TO_TIME", expressions=args)
+    
+    string_expr, format_expr = args
+    
+    # 使用STRPTIME解析，然后CAST为TIME
+    strptime_expr = exp.Anonymous(
+        this="STRPTIME",
+        expressions=[string_expr, format_expr]
+    )
+    
+    return exp.Cast(this=strptime_expr, to=exp.DataType.build("TIME"))
+
+
+def _make_timestamp_mapping(args: t.List) -> exp.Anonymous:
+    """将MAKE_TIMESTAMP映射为STRPTIME + CONCAT组合
+    
+    MAKE_TIMESTAMP(year, month, day, hour, minute, second) -> STRPTIME(CONCAT(...), '%Y-%m-%d %H:%M:%S')
+    """
+    if len(args) != 6:
+        return exp.Anonymous(this="MAKE_TIMESTAMP", expressions=args)
+    
+    year, month, day, hour, minute, second = args
+    
+    # 构建日期时间字符串：YYYY-MM-DD HH:MM:SS
+    year_str = exp.Anonymous(
+        this="LPAD",
+        expressions=[
+            exp.Cast(this=year, to=exp.DataType.build("STRING")),
+            exp.Literal.number("4"),
+            exp.Literal.string("0")
+        ]
+    )
+    
+    month_str = exp.Anonymous(
+        this="LPAD",
+        expressions=[
+            exp.Cast(this=month, to=exp.DataType.build("STRING")),
+            exp.Literal.number("2"),
+            exp.Literal.string("0")
+        ]
+    )
+    
+    day_str = exp.Anonymous(
+        this="LPAD",
+        expressions=[
+            exp.Cast(this=day, to=exp.DataType.build("STRING")),
+            exp.Literal.number("2"),
+            exp.Literal.string("0")
+        ]
+    )
+    
+    hour_str = exp.Anonymous(
+        this="LPAD",
+        expressions=[
+            exp.Cast(this=hour, to=exp.DataType.build("STRING")),
+            exp.Literal.number("2"),
+            exp.Literal.string("0")
+        ]
+    )
+    
+    minute_str = exp.Anonymous(
+        this="LPAD", 
+        expressions=[
+            exp.Cast(this=minute, to=exp.DataType.build("STRING")),
+            exp.Literal.number("2"),
+            exp.Literal.string("0")
+        ]
+    )
+    
+    second_str = exp.Anonymous(
+        this="LPAD",
+        expressions=[
+            exp.Cast(this=second, to=exp.DataType.build("STRING")),
+            exp.Literal.number("2"),
+            exp.Literal.string("0")
+        ]
+    )
+    
+    # 拼接日期时间字符串
+    datetime_string = exp.Anonymous(
+        this="CONCAT",
+        expressions=[
+            year_str,
+            exp.Literal.string("-"),
+            month_str,
+            exp.Literal.string("-"),
+            day_str,
+            exp.Literal.string(" "),
+            hour_str,
+            exp.Literal.string(":"),
+            minute_str,
+            exp.Literal.string(":"),
+            second_str
+        ]
+    )
+    
+    # 使用STRPTIME解析
+    return exp.Anonymous(
+        this="STRPTIME",
+        expressions=[datetime_string, exp.Literal.string("%Y-%m-%d %H:%M:%S")]
+    )
+
+
+def _trim_to_ltrim_rtrim(args: t.List) -> exp.Anonymous:
+    """将TRIM映射为LTRIM(RTRIM(...))组合
+    
+    TRIM(string) -> LTRIM(RTRIM(string))
+    TRIM(BOTH chars FROM string) -> LTRIM(RTRIM(string, chars), chars)
+    TRIM(LEADING chars FROM string) -> LTRIM(string, chars)
+    TRIM(TRAILING chars FROM string) -> RTRIM(string, chars)
+    """
+    if len(args) == 0:
+        return exp.Anonymous(this="LTRIM", expressions=[exp.Literal.string("")])
+    
+    if len(args) == 1:
+        # 简单的TRIM(string)情况
+        string_expr = args[0]
+        # 使用LTRIM(RTRIM(string))组合
+        rtrim_expr = exp.Anonymous(this="RTRIM", expressions=[string_expr])
+        return exp.Anonymous(this="LTRIM", expressions=[rtrim_expr])
+    
+    # 复杂的TRIM情况，暂时返回原始实现
+    # 实际应用中可能需要更复杂的解析
+    return exp.Anonymous(this="LTRIM", expressions=[exp.Anonymous(this="RTRIM", expressions=args)])
+
+
+def _btrim_to_ltrim_rtrim(args: t.List) -> exp.Anonymous:
+    """将BTRIM映射为LTRIM(RTRIM(...))组合
+    
+    BTRIM(string) -> LTRIM(RTRIM(string))
+    BTRIM(string, chars) -> LTRIM(RTRIM(string, chars), chars)
+    """
+    if len(args) == 0:
+        return exp.Anonymous(this="LTRIM", expressions=[exp.Literal.string("")])
+    
+    if len(args) == 1:
+        # 简单的BTRIM(string)情况
+        string_expr = args[0]
+        # 使用LTRIM(RTRIM(string))组合
+        rtrim_expr = exp.Anonymous(this="RTRIM", expressions=[string_expr])
+        return exp.Anonymous(this="LTRIM", expressions=[rtrim_expr])
+    
+    if len(args) == 2:
+        # BTRIM(string, chars)情况
+        string_expr, chars_expr = args
+        # 使用LTRIM(RTRIM(string, chars), chars)组合
+        rtrim_expr = exp.Anonymous(this="RTRIM", expressions=[string_expr, chars_expr])
+        return exp.Anonymous(this="LTRIM", expressions=[rtrim_expr, chars_expr])
+    
+    # 复杂情况，返回原始实现
+    return exp.Anonymous(this="LTRIM", expressions=[exp.Anonymous(this="RTRIM", expressions=args)])
+
+
+def _percentile_cont_to_quantile(args: t.List) -> exp.Anonymous:
+    """将PERCENTILE_CONT映射为QUANTILE_T_DIGEST
+    
+    PERCENTILE_CONT(0.5) -> APPROX_MEDIAN (特殊情况优化)
+    PERCENTILE_CONT(fraction) -> QUANTILE_T_DIGEST
+    """
+    if len(args) < 1:
+        # 参数不足，返回默认
+        return exp.Anonymous(this="QUANTILE_T_DIGEST", expressions=[exp.Literal.string("NULL"), exp.Literal.number("0.5")])
+    
+    fraction = args[0]
+    
+    # 检查是否为0.5的特殊情况（中位数）
+    if (isinstance(fraction, exp.Literal) and 
+        fraction.this == "0.5"):
+        # 返回占位符，在TRANSFORMS中进一步处理为APPROX_MEDIAN
+        return exp.Anonymous(this="APPROX_MEDIAN_PLACEHOLDER", expressions=args)
+    
+    # 返回占位符，在TRANSFORMS中进一步处理
+    return exp.Anonymous(this="QUANTILE_T_DIGEST_PLACEHOLDER", expressions=args)
+
+
+def _percentile_disc_to_quantile(args: t.List) -> exp.Anonymous:
+    """将PERCENTILE_DISC映射为QUANTILE_T_DIGEST
+    
+    PERCENTILE_DISC(fraction) -> QUANTILE_T_DIGEST
+    """
+    if len(args) < 1:
+        # 参数不足，返回默认
+        return exp.Anonymous(this="QUANTILE_T_DIGEST", expressions=[exp.Literal.string("NULL"), exp.Literal.number("0.5")])
+    
+    # 返回占位符，在TRANSFORMS中进一步处理
+    return exp.Anonymous(this="QUANTILE_T_DIGEST_PLACEHOLDER", expressions=args)
+
+
 class Yanhuang(Postgres):
     """
     炎凰SQL方言，继承自Postgres。
@@ -431,7 +953,20 @@ class Yanhuang(Postgres):
 
     # ref: https://docs.aws.amazon.com/redshift/latest/dg/r_FORMAT_strings.html
     TIME_FORMAT = "'YYYY-MM-DD HH24:MI:SS'"
-    TIME_MAPPING = {**Postgres.TIME_MAPPING, "MON": "%b", "HH24": "%H", "HH": "%I"}
+    TIME_MAPPING = {
+        # 先定义长模式，确保优先匹配
+        "Day": "%A",     # 完整星期名
+        "Month": "%B",   # 完整月份名
+        "Mon": "%b",     # 简写月份名
+        "DY": "%a",      # 简写星期名
+        # 然后继承PostgreSQL的映射
+        **Postgres.TIME_MAPPING, 
+        "MON": "%b", 
+        "HH24": "%H", 
+        "HH": "%I",
+        # 保持原有的D映射
+        "D": "%w",       # 星期数字(0-6)
+    }
     
     # BYTE_START和BYTE_END由metaclass根据tokenizer的BYTE_STRINGS自动设置
 
@@ -450,6 +985,8 @@ class Yanhuang(Postgres):
             "ADD_MONTHS": _add_months_to_date_add,  # ADD_MONTHS映射为DATE_ADD
             "ADDMONTHS": _add_months_to_date_add,  # ADDMONTHS别名也映射为DATE_ADD
             "CURRENT_TIMESTAMP": _current_timestamp_to_now,  # CURRENT_TIMESTAMP映射为NOW（保持元数据）
+            "CURRENT_TIME": _current_time_to_strftime,  # CURRENT_TIME映射为STRFTIME获取带时区TIME值
+            "LOCALTIME": _localtime_to_strftime,  # LOCALTIME映射为STRFTIME获取不带时区TIME值
             "GETDATE": _getdate_to_now,  # GETDATE映射为NOW
             "DATEADD": _dateadd_to_date_add,  # DATEADD映射为DATE_ADD
             "DATEDIFF": _datediff_to_date_diff,  # DATEDIFF映射为DATE_DIFF
@@ -467,12 +1004,13 @@ class Yanhuang(Postgres):
             "ARRAY_LENGTH": _array_length_to_array_size,  # ARRAY_LENGTH映射为ARRAY_SIZE
             "CARDINALITY": _cardinality_to_array_size,  # CARDINALITY映射为ARRAY_SIZE  
             "ARRAY_CONCAT": _array_concat_to_array_cat,  # ARRAY_CONCAT映射为ARRAY_CAT
+            "ARRAY_TO_STRING": _array_to_string_to_array_join,  # ARRAY_TO_STRING映射为ARRAY_JOIN
             "SPLIT": _split_to_array_split,  # SPLIT映射为ARRAY_SPLIT
             "STRING_SPLIT": _split_to_array_split,  # STRING_SPLIT映射为ARRAY_SPLIT
             
             # 4. 字符串函数映射（参数顺序调整）
             "STRPOS": _strpos_to_position,  # STRPOS映射为POSITION（参数顺序调整）
-            "TRIM": _trim_function_mapping,  # TRIM参数标准化
+            # TRIM函数通过exp.Trim在TRANSFORMS中处理，不在FUNCTIONS中映射
             "TRANSLATE": _translate_function_mapping,  # TRANSLATE保持不变
             "OVERLAY": _overlay_to_replace,  # OVERLAY映射处理
             
@@ -492,6 +1030,35 @@ class Yanhuang(Postgres):
             
             # 8. UUID函数映射
             "GENERATE_UUID": _generate_uuid_to_uuid,  # GENERATE_UUID映射为UUID
+            
+            # 9. 错误继承函数的复合映射（炎凰数据不支持但PostgreSQL支持的函数）
+            # BOOL_AND和BOOL_OR已移至TRANSFORMS中处理
+            # PERCENT_RANK已移至TRANSFORMS中处理
+            
+            # 10. 高优先级虚继承函数映射（第七批优化）
+            "TIME_TO_UNIX": _time_to_unix_mapping,  # TimeToUnix映射为DATE_PART('epoch', timestamp)
+            "STRPOS": _str_position_mapping,  # StrPosition映射为POSITION函数
+            "COUNT_IF": _count_if_to_sum_case,  # CountIf映射为SUM(CASE WHEN ... THEN 1 ELSE 0 END)
+            "RAND": _rand_to_random,  # Rand映射为RANDOM函数
+            "UNICODE": _unicode_to_ascii,  # Unicode映射为ASCII函数
+            "TIMESTAMP_TRUNC": _timestamp_trunc_mapping,  # TimestampTrunc映射为DATE_TRUNC
+            "DATE_SUB": _date_sub_mapping,  # DateSub映射为DATE_ADD的负数形式
+            "UUID_GENERATE": _uuid_to_uuid_func,  # Uuid映射为UUID函数
+            "CURRENT_USER": _current_user_mapping,  # CurrentUser映射为USER函数
+            
+            # 11. 百分位数函数映射（第十一批优化）
+            "PERCENTILE_CONT": _percentile_cont_to_quantile,  # PERCENTILE_CONT映射为QUANTILE_T_DIGEST或APPROX_MEDIAN
+            "PERCENTILE_DISC": _percentile_disc_to_quantile,  # PERCENTILE_DISC映射为QUANTILE_T_DIGEST
+            
+            # 12. 时间构造函数映射（第十二批优化）
+            "MAKE_TIME": _make_time_mapping,  # MAKE_TIME映射为STRPTIME + CONCAT组合
+            "MAKE_TIMESTAMP": _make_timestamp_mapping,  # MAKE_TIMESTAMP映射为STRPTIME + CONCAT组合
+            "STR_TO_DATE": _str_to_date_mapping,  # STR_TO_DATE映射为CAST(STRPTIME(...) AS DATE)
+            "STR_TO_TIME": _str_to_time_mapping_fixed,  # STR_TO_TIME映射为CAST(STRPTIME(...) AS TIME)
+            
+            # 13. 类型转换函数映射（虚拟继承函数）
+            "SAFE_CAST": lambda args: exp.Anonymous(this="SAFE_CAST", expressions=args),
+            "TRY_CAST": lambda args: exp.Anonymous(this="TRY_CAST", expressions=args),
             
             # ===== 炎凰SQL原生支持函数（147个，无需映射） =====
             
@@ -519,42 +1086,32 @@ class Yanhuang(Postgres):
             "REPEAT": lambda args: exp.Repeat.from_arg_list(args),
             "LPAD": lambda args: exp.Anonymous(this="LPAD", expressions=args),
             "RPAD": lambda args: exp.Anonymous(this="RPAD", expressions=args),
-            "LTRIM": lambda args: exp.Anonymous(this="LTRIM", expressions=args),
-            "RTRIM": lambda args: exp.Anonymous(this="RTRIM", expressions=args),
+            "LTRIM": lambda args: exp.Anonymous(this="LTRIM", expressions=args + [exp.Literal.string(" ")] if len(args) == 1 else args),
+            "RTRIM": lambda args: exp.Anonymous(this="RTRIM", expressions=args + [exp.Literal.string(" ")] if len(args) == 1 else args),
             "REPLACE": lambda args: exp.Anonymous(this="REPLACE", expressions=args),
             "ASCII": lambda args: exp.Anonymous(this="ASCII", expressions=args),
             "CHR": lambda args: exp.Anonymous(this="CHR", expressions=args),
             "INITCAP": lambda args: exp.Anonymous(this="INITCAP", expressions=args),
             "SPLIT_PART": lambda args: exp.Anonymous(this="SPLIT_PART", expressions=args),
             
-            # 数学函数补充
-            "ABS": lambda args: exp.Abs.from_arg_list(args),
-            "CEIL": lambda args: exp.Ceil.from_arg_list(args),
-            "CEILING": lambda args: exp.Ceil.from_arg_list(args),
-            "FLOOR": lambda args: exp.Floor.from_arg_list(args),
-            "ROUND": lambda args: exp.Round.from_arg_list(args),
+            # 第一批数学函数优化完成 - ABS, CEIL, FLOOR, ROUND (通过PostgreSQL继承)
+            # 第二批数学函数优化完成 - EXP, LOG, LOG10, POW, POWER, CEILING (通过PostgreSQL继承)
+            # 注释：以上函数在PostgreSQL和炎凰SQL中100%语义相同，现通过继承实现
+            # "CEILING": lambda args: exp.Ceil.from_arg_list(args),  # 已删除：CEILING→CEIL自动转换
+            # "POWER": lambda args: exp.Pow.from_arg_list(args),     # 已删除：通过继承实现
+            # "POW": lambda args: exp.Pow.from_arg_list(args),       # 已删除：POW→POWER自动转换
+            # "LOG": lambda args: exp.Log.from_arg_list(args),       # 已删除：通过继承实现
+            # "LOG10": lambda args: exp.Anonymous(this="LOG10", expressions=args),  # 已删除：通过继承实现
+            # "EXP": lambda args: exp.Exp.from_arg_list(args),       # 已删除：通过继承实现
+            
+            # 数学函数补充（保留炎凰SQL特有或需要Anonymous的函数）
             "SQRT": lambda args: exp.Sqrt.from_arg_list(args),
-            "POWER": lambda args: exp.Pow.from_arg_list(args),
-            "POW": lambda args: exp.Pow.from_arg_list(args),
             "MOD": lambda args: exp.Anonymous(this="MOD", expressions=args),
-            "SIN": lambda args: exp.Anonymous(this="SIN", expressions=args),
-            "COS": lambda args: exp.Anonymous(this="COS", expressions=args),
-            "TAN": lambda args: exp.Anonymous(this="TAN", expressions=args),
-            "ASIN": lambda args: exp.Anonymous(this="ASIN", expressions=args),
-            "ACOS": lambda args: exp.Anonymous(this="ACOS", expressions=args),
-            "ATAN": lambda args: exp.Anonymous(this="ATAN", expressions=args),
-            "ATAN2": lambda args: exp.Anonymous(this="ATAN2", expressions=args),
-            "LOG": lambda args: exp.Log.from_arg_list(args),
-            "LOG10": lambda args: exp.Anonymous(this="LOG10", expressions=args),
             "LN": lambda args: exp.Ln.from_arg_list(args),
-            "EXP": lambda args: exp.Exp.from_arg_list(args),
             "SIGN": lambda args: exp.Anonymous(this="SIGN", expressions=args),
             "TRUNC": lambda args: exp.Anonymous(this="TRUNC", expressions=args),
             "TRUNCATE": lambda args: exp.Anonymous(this="TRUNCATE", expressions=args),
             "RANDOM": lambda args: exp.Anonymous(this="RANDOM", expressions=args),
-            "PI": lambda args: exp.Anonymous(this="PI", expressions=args),
-            "DEGREES": lambda args: exp.Anonymous(this="DEGREES", expressions=args),
-            "RADIANS": lambda args: exp.Anonymous(this="RADIANS", expressions=args),
             
             # 添加scalar_functions.md中缺失的数学函数
             "CBRT": lambda args: exp.Anonymous(this="CBRT", expressions=args),
@@ -564,7 +1121,7 @@ class Yanhuang(Postgres):
             "TANH": lambda args: exp.Anonymous(this="TANH", expressions=args),
             "BROUND": lambda args: exp.Anonymous(this="BROUND", expressions=args),
             "FACTORIAL": lambda args: exp.Anonymous(this="FACTORIAL", expressions=args),
-            "RAND": lambda args: exp.Anonymous(this="RAND", expressions=args),
+            "RAND": _rand_to_random,  # RAND映射为RANDOM函数
             "PMOD": lambda args: exp.Anonymous(this="PMOD", expressions=args),
             
             # 位运算函数
@@ -632,6 +1189,7 @@ class Yanhuang(Postgres):
             "IS_IPV6": lambda args: exp.Anonymous(this="IS_IPV6", expressions=args),
             "IS_IPV6_LOOPBACK": lambda args: exp.Anonymous(this="IS_IPV6_LOOPBACK", expressions=args),
             "CIDR_MATCH": lambda args: exp.Anonymous(this="CIDR_MATCH", expressions=args),
+            "TYPEOF": lambda args: exp.Anonymous(this="TYPEOF", expressions=args),
             
             # URL处理函数
             "CUT_QUERY_STRING": lambda args: exp.Anonymous(this="CUT_QUERY_STRING", expressions=args),
@@ -689,7 +1247,6 @@ class Yanhuang(Postgres):
             # 日期时间函数补充 - 仅保留炎凰数据明确支持的函数
             "NOW": lambda args: _create_current_timestamp_with_func('NOW'),
             "CURRENT_DATE": exp.CurrentDate.from_arg_list,
-            "CURRENT_TIME": exp.CurrentTime.from_arg_list,
             # 移除EXTRACT - 炎凰数据不支持此函数，只支持DATE_PART
             # "EXTRACT": exp.Extract.from_arg_list,
             "DATE_PART": lambda args: exp.Anonymous(this="DATE_PART", expressions=args),  # 保持原始函数名
@@ -749,7 +1306,7 @@ class Yanhuang(Postgres):
             "ROW_NUMBER": lambda args: exp.Anonymous(this="ROW_NUMBER", expressions=args),
             "RANK": lambda args: exp.Anonymous(this="RANK", expressions=args),
             "DENSE_RANK": lambda args: exp.Anonymous(this="DENSE_RANK", expressions=args),
-            "PERCENT_RANK": lambda args: exp.Anonymous(this="PERCENT_RANK", expressions=args),
+            # "PERCENT_RANK": 已在上面通过复合映射处理
             "CUME_DIST": lambda args: exp.Anonymous(this="CUME_DIST", expressions=args),
             "NTILE": lambda args: exp.Anonymous(this="NTILE", expressions=args),
             "LAG": lambda args: exp.Anonymous(this="LAG", expressions=args),
@@ -792,7 +1349,7 @@ class Yanhuang(Postgres):
             "ARRAY_POSITION": lambda args: exp.Anonymous(this="ARRAY_POSITION", expressions=args),
             "ARRAY_REMOVE": lambda args: exp.Anonymous(this="ARRAY_REMOVE", expressions=args),
             "ARRAY_REPLACE": lambda args: exp.Anonymous(this="ARRAY_REPLACE", expressions=args),
-            "ARRAY_TO_STRING": lambda args: exp.Anonymous(this="ARRAY_TO_STRING", expressions=args),
+            # "ARRAY_TO_STRING": 已移除原生定义，现在通过映射转换为ARRAY_JOIN
             "STRING_TO_ARRAY": lambda args: exp.Anonymous(this="STRING_TO_ARRAY", expressions=args),
             
             # 其他工具函数
@@ -801,6 +1358,11 @@ class Yanhuang(Postgres):
             "DATABASE": lambda args: exp.Anonymous(this="DATABASE", expressions=args),
             "SCHEMA": lambda args: exp.Anonymous(this="SCHEMA", expressions=args),
             "CONNECTION_ID": lambda args: exp.Anonymous(this="CONNECTION_ID", expressions=args),
+            
+            # 不支持的函数 - 提供解析支持但在生成时警告
+            "NORMALIZE": lambda args: exp.Anonymous(this="NORMALIZE", expressions=args),
+            "JSON_OBJECT": lambda args: exp.Anonymous(this="JSON_OBJECT", expressions=args),
+            "GAP_FILL": lambda args: exp.Anonymous(this="GAP_FILL", expressions=args),
             
             # Python表函数支持
             "LOAD_EXCEL": lambda args: exp.Anonymous(this="LOAD_EXCEL", expressions=args),
@@ -853,6 +1415,8 @@ class Yanhuang(Postgres):
             **Postgres.Parser.NO_PAREN_FUNCTION_PARSERS,
             "APPROXIMATE": lambda self: self._parse_approximate_count(),
             "SYSDATE": lambda self: self.expression(exp.CurrentTimestamp, sysdate=True),
+            "CURRENT_TIME": lambda self: _current_time_to_strftime([]),
+            "LOCALTIME": lambda self: _localtime_to_strftime([]),
         }
 
         # 注册DELETE和DESCRIBE解析器
@@ -1212,18 +1776,27 @@ class Yanhuang(Postgres):
 
         TYPE_MAPPING = {
             **Postgres.Generator.TYPE_MAPPING,
-            exp.DataType.Type.BINARY: "VARBYTE",
-            exp.DataType.Type.BLOB: "VARBYTE",
-            exp.DataType.Type.INT: "INT",  # 使用INT而不是INTEGER
-            exp.DataType.Type.TEXT: "STRING",  # 使用STRING而不是TEXT
-            exp.DataType.Type.TIMETZ: "TIME",
-            exp.DataType.Type.TIMESTAMPTZ: "TIMESTAMP",
-            exp.DataType.Type.VARBINARY: "VARBYTE",
-            exp.DataType.Type.ROWVERSION: "VARBYTE",
-            exp.DataType.Type.FLOAT: "FLOAT",
-            exp.DataType.Type.DOUBLE: "DOUBLE",  # 保持DOUBLE类型不变
-            exp.DataType.Type.DECIMAL: "DECIMAL",
-            exp.DataType.Type.BOOLEAN: "BOOLEAN",
+            # 根据炎凰数据CAST语法文档优化类型映射
+            exp.DataType.Type.INT: "int",  # 炎凰数据使用小写int
+            exp.DataType.Type.BIGINT: "long",  # BIGINT映射为long
+            exp.DataType.Type.FLOAT: "float",  # 炎凰数据使用小写float
+            exp.DataType.Type.DOUBLE: "double",  # 炎凰数据使用小写double
+            exp.DataType.Type.TEXT: "string",  # 炎凰数据使用小写string
+            exp.DataType.Type.VARCHAR: "string",  # VARCHAR映射为string
+            exp.DataType.Type.CHAR: "string",  # CHAR映射为string
+            exp.DataType.Type.BOOLEAN: "boolean",  # 炎凰数据使用小写boolean
+            exp.DataType.Type.DECIMAL: "decimal",  # 保持decimal，支持precision和scale
+            
+            # 其他类型保持原有映射或使用合理的替代
+            exp.DataType.Type.BINARY: "string",  # 二进制数据映射为string
+            exp.DataType.Type.BLOB: "string",  # BLOB映射为string
+            exp.DataType.Type.VARBINARY: "string",  # VARBINARY映射为string
+            exp.DataType.Type.ROWVERSION: "string",  # ROWVERSION映射为string
+            exp.DataType.Type.TIMETZ: "string",  # 带时区的TIME映射为string
+            exp.DataType.Type.TIMESTAMPTZ: "string",  # 带时区的TIMESTAMP映射为string
+            exp.DataType.Type.DATE: "string",  # DATE映射为string（炎凰数据通过字符串处理日期）
+            exp.DataType.Type.TIME: "string",  # TIME映射为string
+            exp.DataType.Type.TIMESTAMP: "string",  # TIMESTAMP映射为string
         }
 
         TRANSFORMS = {
@@ -1233,8 +1806,8 @@ class Yanhuang(Postgres):
             exp.ConcatWs: concat_ws_to_dpipe_sql,
             exp.ApproxDistinct: lambda self, e: f"APPROXIMATE COUNT(DISTINCT {self.sql(e, 'this')})",
             exp.CurrentTimestamp: lambda self, e: self.currenttimestamp_sql(e),
+            exp.CurrentTime: lambda self, e: "STRFTIME(NOW(), '%H:%M:%S%z')",  # CURRENT_TIME映射为STRFTIME获取带时区TIME值
             exp.CurrentDate: lambda self, e: "DATE_TRUNC('day', NOW())",  # 炎凰SQL不支持CURRENT_DATE
-            exp.CurrentTime: lambda self, e: "CURRENT_TIME",  # 修复CURRENT_TIME不加括号
             exp.DateAdd: lambda self, e: self.date_add_sql(e),  # 使用炎凰语法
             exp.DateDiff: lambda self, e: self.date_diff_sql(e),  # 使用炎凰语法
             exp.Delete: lambda self, e: self.delete_sql(e),
@@ -1295,6 +1868,55 @@ class Yanhuang(Postgres):
             
             # 条件函数转换
             exp.If: lambda self, e: self.func("IF", e.this, e.args.get("true"), e.args.get("false")),
+            
+            # 哈希函数转换 (第四批优化)
+            exp.MD5: lambda self, e: f"HASH_MD5({self.sql(e, 'this')})",
+            exp.SHA: lambda self, e: f"HASH_SHA1({self.sql(e, 'this')})",
+            exp.SHA2: lambda self, e: f"HASH_SHA256({self.sql(e, 'this')})" if not hasattr(e, 'length') or not e.length or e.length.this == "256" else f"HASH_SHA{e.length.this}({self.sql(e, 'this')})",
+            
+            # 编码函数转换 (第五批优化) - 基于炎凰数据实际支持情况
+            exp.Encode: lambda self, e: self._handle_unsupported_encode(e),
+            exp.Decode: lambda self, e: f"UNBASE64_STRING({self.sql(e, 'this')})" if e.args.get('charset') and 'base64' in self.sql(e.args.get('charset')).lower() else f"DECODE({self.sql(e, 'this')}, {self.sql(e.args.get('charset'))})",
+            
+            # 第六批优化：不支持函数的转换实现在anonymous_sql中处理
+            # exp.SafeCast和exp.TryCast等不存在，改为在anonymous_sql中处理
+            
+            # 第七批优化：高优先级虚继承函数转换
+            exp.TimeToUnix: lambda self, e: self.func("DATE_PART", exp.Literal.string("epoch"), e.this),
+            exp.StrPosition: lambda self, e: self.func("POSITION", e.args.get('substr'), e.args.get('this')) if e.args.get('substr') and e.args.get('this') else self.func("POSITION", *e.expressions),
+            exp.CountIf: lambda self, e: f"SUM(CASE WHEN {self.sql(e.this)} THEN 1 ELSE 0 END)",
+            exp.Rand: lambda self, e: "RANDOM()",
+            exp.Unicode: lambda self, e: self.func("ASCII", e.this),
+            exp.TimestampTrunc: lambda self, e: self.func("DATE_TRUNC", exp.Literal.string(e.unit.this.lower()) if hasattr(e.unit, 'this') else e.unit, e.this) if hasattr(e, 'unit') and hasattr(e, 'this') else self.func("DATE_TRUNC", *e.expressions),
+            exp.DateSub: lambda self, e: self.func("DATE_ADD", e.unit, exp.Neg(this=e.expression), e.this) if hasattr(e, 'unit') else self.date_add_sql(e),
+            exp.Uuid: lambda self, e: "UUID()",
+            exp.CurrentUser: lambda self, e: "USER()",
+            exp.Extract: lambda self, e: self.func("DATE_PART", exp.Literal.string(e.this.this.lower()) if hasattr(e.this, 'this') else e.this, e.expression),
+            exp.Filter: lambda self, e: f"SUM(CASE WHEN {self.sql(e.expression.this)} THEN 1 ELSE 0 END)" if isinstance(e.this, exp.Count) else f"SUM(CASE WHEN {self.sql(e.expression.this)} THEN {self.sql(e.this.this)} ELSE 0 END)",
+            exp.Sub: lambda self, e: self.func("DATE_ADD", e.this, exp.Neg(this=e.expression.this), e.expression.unit) if isinstance(e.expression, exp.Interval) else self.binary(e, "-"),
+            
+            # 第八批优化：中优先级虚继承函数转换
+            exp.ArrayConcat: lambda self, e: self.func("ARRAY_CAT", *e.expressions),
+            exp.Add: lambda self, e: self.func("DATE_ADD", e.this, e.expression.this, e.expression.unit) if isinstance(e.expression, exp.Interval) else self.binary(e, "+"),
+            exp.Anonymous: lambda self, e: self.func("DATE_DIFF", e.expressions[1], e.expressions[0]) if e.this == "AGE" and len(e.expressions) >= 2 else self.anonymous_sql(e),
+            exp.RegexpLike: lambda self, e: self.func("REGEXP_LIKE", e.this, e.expression),
+            
+            # 第九批优化：错误继承函数的复合映射转换
+            exp.LogicalAnd: lambda self, e: f"(MIN(CASE WHEN {self.sql(e.this)} THEN 1 ELSE 0 END) = 1)",
+            exp.LogicalOr: lambda self, e: f"(MAX(CASE WHEN {self.sql(e.this)} THEN 1 ELSE 0 END) = 1)",
+            
+            # 第十批优化：时间日期函数映射转换
+            exp.TimeToStr: lambda self, e: self.func("STRFTIME", e.this, self._convert_time_format(e.args.get('format'))),
+            exp.StrToTime: lambda self, e: self.func("STRPTIME", e.this, self._convert_time_format(e.args.get('format'))),
+            
+            # 第十一批优化：百分位数函数映射转换
+            exp.PercentileCont: lambda self, e: self.percentile_cont_sql(e),
+            exp.PercentileDisc: lambda self, e: self.percentile_disc_sql(e),
+            
+            # TRIM函数映射转换（使用LTRIM和RTRIM组合）
+            exp.Trim: lambda self, e: self.trim_sql(e),
+            
+
         }
 
         # Postgres maps exp.Pivot to no_pivot_sql, but Redshift support pivots
@@ -1306,7 +1928,7 @@ class Yanhuang(Postgres):
         # Redshift supports these functions
         TRANSFORMS.pop(exp.AnyValue)
         TRANSFORMS.pop(exp.LastDay)
-        TRANSFORMS.pop(exp.SHA2)
+        # SHA2转换已在上面的TRANSFORMS中定义，不再移除
 
         RESERVED_KEYWORDS = {
             "aes128",
@@ -1664,15 +2286,69 @@ class Yanhuang(Postgres):
                 select = f"{with_sql} {select.strip()}"
             return select.strip()
 
+        def _handle_unsupported_encode(self, expression: exp.Encode) -> str:
+            """处理不支持的ENCODE函数"""
+            from sqlglot.errors import UnsupportedError
+            raise UnsupportedError(
+                "ENCODE() function is not supported in Yanhuang SQL.\n"
+                "替代方案：\n"
+                "- 对于BASE64编码：建议在应用层进行编码\n"
+                "- 对于其他编码：请查阅炎凰数据文档确认支持的编码函数"
+            )
+
+        def _unsupported_function_sql(self, func_name: str, expression: exp.Anonymous) -> str:
+            """为不支持的函数提供友好的错误信息和替代建议"""
+            from sqlglot.errors import UnsupportedError
+            
+            # 针对不同函数类型提供特定的错误信息和建议
+            if func_name in ["JSON_OBJECT", "JSON_OBJECTAGG", "JSON_TABLE", "JSONB_EXISTS"]:
+                alternative = "炎凰数据提供其他JSON处理函数，如JSON_EXTRACT、JSON_AGG等，请查阅文档获取完整列表"
+            elif func_name in ["XMLELEMENT", "XMLTABLE"]:
+                alternative = "炎凰数据提供PARSE_XML表函数进行XML处理"
+            elif func_name == "GAP_FILL":
+                alternative = "可使用窗口函数LAG/LEAD配合CASE WHEN实现数据填充"
+            elif func_name == "OPENJSON":
+                alternative = "使用PARSE_JSON表函数处理JSON数据"
+            elif func_name in ["ARGMAX", "ARGMIN"]:
+                alternative = "使用窗口函数：FIRST_VALUE(id) OVER (ORDER BY value DESC/ASC)"
+            elif func_name == "NORMALIZE":
+                alternative = "可使用字符串函数REPLACE配合正则表达式实现标准化"
+            elif func_name == "OVERLAY":
+                alternative = "使用SUBSTRING和CONCAT函数组合实现字符串替换"
+            else:
+                alternative = "请查阅炎凰数据官方文档寻找等效函数"
+            
+            raise UnsupportedError(
+                f"{func_name}() function is not supported in Yanhuang SQL.\n"
+                f"替代方案：{alternative}"
+            )
+        
         def anonymous_sql(self, expression: exp.Anonymous) -> str:
-            """处理匿名函数，包括不支持的系统函数检测"""
+            """处理匿名函数，基于炎凰数据实际支持的功能进行虚拟继承函数映射"""
             func_name = expression.this
             
-            # 检测不支持的系统函数
-            unsupported_functions = {"DATABASE", "USER", "VERSION", "SCHEMA", "CONNECTION_ID"}
-            if func_name in unsupported_functions:
-                from sqlglot.errors import UnsupportedError
-                raise UnsupportedError(f"{func_name}() function is not supported in Yanhuang SQL")
+            # 虚拟继承函数处理 - 基于炎凰数据实际支持的功能
+            if hasattr(self, 'VIRTUAL_INHERITANCE_FUNCTIONS') and func_name in self.VIRTUAL_INHERITANCE_FUNCTIONS:
+                handler = self.VIRTUAL_INHERITANCE_FUNCTIONS[func_name]
+                return handler(self, expression)
+            
+            # 高可行性函数映射（推荐直接使用）
+            if func_name == "PI":
+                # PI() → 3.141592653589793 常量
+                return "3.141592653589793"
+            elif func_name == "ATAND":
+                # ATAND(x) → DEGREES(ATAN(x))
+                if len(expression.expressions) != 1:
+                    from sqlglot.errors import UnsupportedError
+                    raise UnsupportedError("ATAND() requires exactly one argument")
+                arg = self.sql(expression.expressions[0])
+                return f"DEGREES(ATAN({arg}))"
+            
+            # ===== 不支持函数的告警处理 =====
+            elif func_name in ["JSON_OBJECT", "JSON_OBJECTAGG", "JSON_TABLE", "JSONB_EXISTS", 
+                               "XMLELEMENT", "XMLTABLE", "GAP_FILL", "OPENJSON", "ARGMAX", "ARGMIN",
+                               "NORMALIZE", "OVERLAY"]:
+                return self._unsupported_function_sql(func_name, expression)
             
             # 使用父类的匿名函数处理
             return super().anonymous_sql(expression)
@@ -1745,6 +2421,20 @@ class Yanhuang(Postgres):
                 )
             # 确保EXISTS与括号之间有空格
             return f"EXISTS ({self.sql(expression, 'this')})"
+
+        def column_sql(self, expression: exp.Column) -> str:
+            """处理列引用，特殊处理LOCALTIME"""
+            # 检查是否是LOCALTIME关键字作为函数使用
+            # 需要检查标识符的名称，不是直接比较对象
+            # 只有在没有表限定符且没有引号的情况下才映射为函数
+            if (hasattr(expression.this, 'name') and 
+                expression.this.name == "LOCALTIME" and 
+                not expression.table and
+                not getattr(expression.this, 'quoted', False)):
+                # LOCALTIME 作为时间函数使用，映射为STRFTIME获取不带时区TIME值
+                return "STRFTIME(NOW(), '%H:%M:%S')"
+            # 其他情况使用标准column处理
+            return super().column_sql(expression)
 
         def alias_sql(self, expression: exp.Alias, alias: t.Optional[str] = None) -> str:
             """
@@ -2417,6 +3107,375 @@ class Yanhuang(Postgres):
             """检查是否在GROUP BY上下文中"""
             # 简化实现，实际需要检查AST树的上下文
             return False  # 需要完整实现
+
+        def _convert_time_format(self, format_expr: exp.Expression) -> exp.Expression:
+            """将PostgreSQL时间格式转换为炎凰数据格式
+            
+            PostgreSQL格式 → 炎凰数据格式映射：
+            YYYY → %Y (4位年份)
+            MM → %m (2位月份)
+            DD → %d (2位日期)
+            HH24 → %H (24小时制小时)
+            HH12 → %I (12小时制小时)
+            MI → %M (分钟)
+            SS → %S (秒)
+            MS → %f (微秒，6位)
+            US → %f (微秒，6位)
+            AM/PM → %p (AM/PM标识)
+            TZ → %z (时区偏移)
+            Day → %A (完整星期名)
+            Month → %B (完整月份名)
+            """
+            if not isinstance(format_expr, exp.Literal):
+                # 如果不是字面量，直接返回
+                return format_expr
+            
+            format_str = format_expr.this
+            if not isinstance(format_str, str):
+                return format_expr
+            
+            # PostgreSQL到炎凰数据的格式映射
+            # 注意：长的模式要放在前面，避免被短模式误匹配
+            format_mapping = [
+                ('YYYY', '%Y'),    # 4位年份
+                ('HH24', '%H'),    # 24小时制小时
+                ('HH12', '%I'),    # 12小时制小时
+                ('Month', '%B'),   # 完整月份名
+                ('Day', '%A'),     # 完整星期名
+                ('Mon', '%b'),     # 简写月份名
+                ('YY', '%y'),      # 2位年份
+                ('MM', '%m'),      # 2位月份
+                ('DD', '%d'),      # 2位日期
+                ('HH', '%I'),      # 默认12小时制
+                ('MI', '%M'),      # 分钟
+                ('SS', '%S'),      # 秒
+                ('MS', '%f'),      # 毫秒/微秒
+                ('US', '%f'),      # 微秒
+                ('AM', '%p'),      # AM/PM标识
+                ('PM', '%p'),      # AM/PM标识
+                ('TZ', '%Z'),      # 时区名称
+                ('DY', '%a'),      # 简写星期名
+                ('D', '%w'),       # 星期数字(0-6)
+                ('WW', '%U'),      # 年中第几周
+                ('W', '%W'),       # 年中第几周
+                ('J', '%j'),       # 年中第几天
+                ('Q', '%q'),       # 季度
+            ]
+            
+            # 执行格式转换（按长度排序，长模式优先避免部分匹配）
+            converted_format = format_str
+            # 按长度降序排序，确保长模式先被替换
+            sorted_mapping = sorted(format_mapping, key=lambda x: len(x[0]), reverse=True)
+            for pg_format, yanhuang_format in sorted_mapping:
+                converted_format = converted_format.replace(pg_format, yanhuang_format)
+            
+            # 后处理：修复PostgreSQL TIME_MAPPING造成的问题
+            # PostgreSQL在解析时已经将Day中的D替换为%u，需要修复
+            converted_format = converted_format.replace('%uay', '%A')  # Day -> %A
+            converted_format = converted_format.replace('%uY', '%a')   # DY -> %a (如果有的话)
+            
+            # 返回转换后的字面量
+            return exp.Literal.string(converted_format)
+
+        def percentile_cont_sql(self, expression: exp.PercentileCont) -> str:
+            """处理PERCENTILE_CONT函数的SQL生成"""
+            # 获取分位数值
+            fraction = expression.this
+            
+            # 检查是否为0.5的特殊情况（中位数）
+            if (isinstance(fraction, exp.Literal) and 
+                fraction.this == "0.5"):
+                return "APPROX_MEDIAN_PLACEHOLDER"
+            
+            return f"QUANTILE_T_DIGEST_PLACEHOLDER({self.sql(fraction)})"
+
+        def percentile_disc_sql(self, expression: exp.PercentileDisc) -> str:
+            """处理PERCENTILE_DISC函数的SQL生成"""
+            # 获取分位数值
+            fraction = expression.this
+            return f"QUANTILE_T_DIGEST_PLACEHOLDER({self.sql(fraction)})"
+
+        def withingroup_sql(self, expression: exp.WithinGroup) -> str:
+            """处理WITHIN GROUP子句的SQL生成"""
+            
+            # 获取内部函数和ORDER BY子句
+            inner_func = expression.this
+            order_expr = expression.expression
+            
+            if isinstance(inner_func, (exp.PercentileCont, exp.PercentileDisc)):
+                # 获取分位数值
+                fraction = inner_func.this
+                
+                # 获取排序列
+                if isinstance(order_expr, exp.Order) and order_expr.expressions:
+                    order_column = order_expr.expressions[0].this
+                    
+                    # 检查是否为PERCENTILE_CONT(0.5)的特殊情况
+                    if (isinstance(inner_func, exp.PercentileCont) and 
+                        isinstance(fraction, exp.Literal) and 
+                        fraction.this == "0.5"):
+                        return f"APPROX_MEDIAN({self.sql(order_column)})"
+                    
+                    # 一般情况：使用QUANTILE_T_DIGEST
+                    return f"QUANTILE_T_DIGEST({self.sql(order_column)}, {self.sql(fraction)})"
+            
+            # 处理占位符情况
+            if hasattr(inner_func, 'this') and isinstance(inner_func.this, str):
+                if inner_func.this == "APPROX_MEDIAN_PLACEHOLDER":
+                    if isinstance(order_expr, exp.Order) and order_expr.expressions:
+                        order_column = order_expr.expressions[0].this
+                        return f"APPROX_MEDIAN({self.sql(order_column)})"
+                elif inner_func.this == "QUANTILE_T_DIGEST_PLACEHOLDER":
+                    if isinstance(order_expr, exp.Order) and order_expr.expressions:
+                        order_column = order_expr.expressions[0].this
+                        if inner_func.expressions:
+                            fraction = inner_func.expressions[0]
+                            return f"QUANTILE_T_DIGEST({self.sql(order_column)}, {self.sql(fraction)})"
+            
+            # 默认情况
+            return f"{self.sql(inner_func)} WITHIN GROUP ({self.sql(order_expr)})"
+
+        def trim_sql(self, expression: exp.Trim) -> str:
+            """处理TRIM函数的SQL生成，映射为LTRIM和RTRIM组合"""
+            
+            # 获取TRIM的参数
+            this = expression.this  # 要处理的字符串
+            position = expression.args.get("position")  # LEADING, TRAILING, BOTH
+            expression_chars = expression.expression  # 要移除的字符
+            
+            # 如果没有指定字符，默认移除空格
+            if not expression_chars:
+                chars_sql = "' '"
+            else:
+                chars_sql = self.sql(expression_chars)
+            
+            string_sql = self.sql(this)
+            
+            # 根据position决定使用哪种TRIM方式
+            if position:
+                position_str = position.name if hasattr(position, 'name') else str(position)
+                if position_str == "LEADING":
+                    # TRIM(LEADING chars FROM string) -> LTRIM(string, chars)
+                    return f"LTRIM({string_sql}, {chars_sql})"
+                elif position_str == "TRAILING":
+                    # TRIM(TRAILING chars FROM string) -> RTRIM(string, chars)
+                    return f"RTRIM({string_sql}, {chars_sql})"
+                elif position_str == "BOTH":
+                    # TRIM(BOTH chars FROM string) -> LTRIM(RTRIM(string, chars), chars)
+                    return f"LTRIM(RTRIM({string_sql}, {chars_sql}), {chars_sql})"
+            
+            # 默认情况：TRIM(string) -> LTRIM(RTRIM(string))
+            if expression_chars:
+                # TRIM(string, chars) -> LTRIM(RTRIM(string, chars), chars)
+                return f"LTRIM(RTRIM({string_sql}, {chars_sql}), {chars_sql})"
+            else:
+                # TRIM(string) -> LTRIM(RTRIM(string))
+                return f"LTRIM(RTRIM({string_sql}))"
+
+        # 虚拟继承函数映射 - 基于炎凰数据实际支持的功能
+        VIRTUAL_INHERITANCE_FUNCTIONS = {
+            # === 聚合函数映射（基于炎凰数据明确支持的聚合函数）===
+            "BOOL_AND": lambda self, e: self._bool_and_to_case_when(e),
+            "BOOL_OR": lambda self, e: self._bool_or_to_case_when(e),
+            "EVERY": lambda self, e: self._bool_and_to_case_when(e),  # EVERY等价于BOOL_AND
+            
+            # === 类型转换函数映射（基于炎凰数据CAST支持）===
+            # 注意：SAFE_CAST和TRY_CAST在PostgreSQL中不是标准函数，需要特殊处理
+            "SAFE_CAST": lambda self, e: self._safe_cast_to_cast(e),
+            "TRY_CAST": lambda self, e: self._try_cast_to_cast(e),
+            # CONVERT已在FUNCTIONS中映射，不在这里重复处理
+            
+            # === 分析函数映射（基于炎凰数据支持的聚合函数）===
+            # 注意：这些函数在FUNCTIONS中没有映射，需要在anonymous_sql中处理
+            "ARGMAX": lambda self, e: self._argmax_to_case_when(e),
+            "ARGMIN": lambda self, e: self._argmin_to_case_when(e),
+            "MAX_BY": lambda self, e: self._argmax_to_case_when(e),
+            "MIN_BY": lambda self, e: self._argmin_to_case_when(e),
+            
+            # === 表函数映射（基于炎凰数据明确支持的表函数）===
+            # 注意：UNNEST和EXPLODE在TRANSFORMS中已处理，这里作为备用
+            "UNNEST": lambda self, e: self._unnest_to_flatten(e),
+            "EXPLODE": lambda self, e: self._explode_to_flatten(e),
+            
+            # === 窗口函数映射（基于炎凰数据支持的窗口函数）===
+            "PERCENT_RANK": lambda self, e: self._percent_rank_to_formula(e),
+            "CUME_DIST": lambda self, e: self._cume_dist_to_formula(e),
+            
+            # === 不支持的函数 - 提供警告和替代建议 ===
+            # 数学函数（炎凰数据不支持）
+            "ATAN2": lambda self, e: self._warn_unsupported_math_function("ATAN2", e),
+            "ATAN2D": lambda self, e: self._warn_unsupported_math_function("ATAN2D", e),
+            "ATANH": lambda self, e: self._warn_unsupported_math_function("ATANH", e),
+            
+            # 编码函数（炎凰数据部分支持）
+            # 注意：ENCODE已在FUNCTIONS中映射到BASE64_ENCODE，这里处理其他编码
+            "URL_ENCODE": lambda self, e: self._warn_unsupported_encode_function("URL_ENCODE", e),
+            
+            # 系统函数（炎凰数据不支持）
+            "CONNECTION_ID": lambda self, e: self._warn_unsupported_system_function("CONNECTION_ID", e),
+            "DATABASE": lambda self, e: self._warn_unsupported_system_function("DATABASE", e),
+            "SCHEMA": lambda self, e: self._warn_unsupported_system_function("SCHEMA", e),
+            "USER": lambda self, e: self._warn_unsupported_system_function("USER", e),
+            "VERSION": lambda self, e: self._warn_unsupported_system_function("VERSION", e),
+        }
+
+        def _bool_and_to_case_when(self, expression: exp.Anonymous) -> str:
+            """将BOOL_AND转换为基于MIN和CASE WHEN的实现"""
+            if not expression.expressions:
+                return "TRUE"  # 空集的BOOL_AND结果为TRUE
+            
+            expr = expression.expressions[0]
+            return f"(MIN(CASE WHEN {self.sql(expr)} THEN 1 ELSE 0 END) = 1)"
+
+        def _bool_or_to_case_when(self, expression: exp.Anonymous) -> str:
+            """将BOOL_OR转换为基于MAX和CASE WHEN的实现"""
+            if not expression.expressions:
+                return "FALSE"  # 空集的BOOL_OR结果为FALSE
+            
+            expr = expression.expressions[0]
+            return f"(MAX(CASE WHEN {self.sql(expr)} THEN 1 ELSE 0 END) = 1)"
+
+        def _safe_cast_to_cast(self, expression: exp.Anonymous) -> str:
+            """将SAFE_CAST转换为CAST（炎凰数据不支持错误处理）"""
+            if len(expression.expressions) < 2:
+                return "NULL"
+            
+            value, target_type = expression.expressions[0], expression.expressions[1]
+            # 处理类型名称，确保是有效的炎凰数据类型
+            type_str = self.sql(target_type)
+            if isinstance(target_type, exp.Identifier):
+                type_str = target_type.this
+            elif isinstance(target_type, exp.Var):
+                type_str = target_type.this
+            
+            return f"CAST({self.sql(value)} AS {type_str})"
+
+        def _try_cast_to_cast(self, expression: exp.Anonymous) -> str:
+            """将TRY_CAST转换为CAST（炎凰数据不支持错误处理）"""
+            return self._safe_cast_to_cast(expression)
+
+        def _convert_to_cast(self, expression: exp.Anonymous) -> str:
+            """将CONVERT转换为CAST"""
+            if len(expression.expressions) < 2:
+                return "NULL"
+            
+            # CONVERT通常是CONVERT(value, type)或CONVERT(type, value)
+            # 假设第一个参数是值，第二个是类型
+            value, target_type = expression.expressions[0], expression.expressions[1]
+            return f"CAST({self.sql(value)} AS {self.sql(target_type)})"
+
+        def _argmax_to_case_when(self, expression: exp.Anonymous) -> str:
+            """将ARGMAX转换为基于窗口函数的实现"""
+            if len(expression.expressions) < 2:
+                return "NULL"
+            
+            id_expr, value_expr = expression.expressions[0], expression.expressions[1]
+            # 使用FIRST_VALUE和ORDER BY实现ARGMAX
+            return f"FIRST_VALUE({self.sql(id_expr)}) OVER (ORDER BY {self.sql(value_expr)} DESC)"
+
+        def _argmin_to_case_when(self, expression: exp.Anonymous) -> str:
+            """将ARGMIN转换为基于窗口函数的实现"""
+            if len(expression.expressions) < 2:
+                return "NULL"
+            
+            id_expr, value_expr = expression.expressions[0], expression.expressions[1]
+            # 使用FIRST_VALUE和ORDER BY实现ARGMIN
+            return f"FIRST_VALUE({self.sql(id_expr)}) OVER (ORDER BY {self.sql(value_expr)} ASC)"
+
+        def _unnest_to_flatten(self, expression: exp.Anonymous) -> str:
+            """将UNNEST转换为FLATTEN表函数"""
+            if not expression.expressions:
+                return "FLATTEN(ARRAY[])"
+            
+            array_expr = expression.expressions[0]
+            return f"FLATTEN({self.sql(array_expr)})"
+
+        def _explode_to_flatten(self, expression: exp.Anonymous) -> str:
+            """将EXPLODE转换为FLATTEN表函数"""
+            return self._unnest_to_flatten(expression)
+
+        def _percent_rank_to_formula(self, expression: exp.Anonymous) -> str:
+            """将PERCENT_RANK转换为基于ROW_NUMBER和COUNT的公式"""
+            # PERCENT_RANK() = (ROW_NUMBER() - 1) / (COUNT(*) - 1)
+            return "((ROW_NUMBER() OVER () - 1) / NULLIF(COUNT(*) OVER () - 1, 0))"
+
+        def _cume_dist_to_formula(self, expression: exp.Anonymous) -> str:
+            """将CUME_DIST转换为基于ROW_NUMBER和COUNT的公式"""
+            # CUME_DIST() = ROW_NUMBER() / COUNT(*)
+            return "(ROW_NUMBER() OVER () / COUNT(*) OVER ())"
+
+        def _warn_unsupported_math_function(self, func_name: str, expression: exp.Anonymous) -> str:
+            """为不支持的数学函数提供警告和替代方案"""
+            alternatives = {
+                "ATAN2": "使用 CASE WHEN x > 0 THEN ATAN(y/x) WHEN x < 0 AND y >= 0 THEN ATAN(y/x) + PI() ... END",
+                "ATAN2D": "使用 DEGREES(ATAN2(...)) 的等价实现",
+                "ATANH": "使用 0.5 * LN((1 + x) / (1 - x)) 公式实现"
+            }
+            
+            alternative = alternatives.get(func_name, "请查阅炎凰数据文档寻找等效函数")
+            
+            print(f"⚠️  警告: {func_name}() 函数在炎凰数据中不支持")
+            print(f"   替代方案: {alternative}")
+            
+            # 返回注释形式，保持SQL可执行性
+            args_str = ", ".join(self.sql(arg) for arg in expression.expressions)
+            return f"/* {func_name}不支持，建议: {alternative} */ NULL"
+
+        def _warn_unsupported_encode_function(self, func_name: str, expression: exp.Anonymous) -> str:
+            """为不支持的编码函数提供警告和替代方案"""
+            alternatives = {
+                "ENCODE": "炎凰数据仅支持BASE64编码，使用应用层处理其他编码",
+                "URL_ENCODE": "炎凰数据仅支持URL_DECODE，建议在应用层进行URL编码"
+            }
+            
+            alternative = alternatives.get(func_name, "请在应用层处理编码需求")
+            
+            print(f"⚠️  警告: {func_name}() 函数在炎凰数据中不支持")
+            print(f"   替代方案: {alternative}")
+            
+            args_str = ", ".join(self.sql(arg) for arg in expression.expressions)
+            return f"/* {func_name}不支持，建议: {alternative} */ NULL"
+
+        def _warn_unsupported_system_function(self, func_name: str, expression: exp.Anonymous) -> str:
+            """为不支持的系统函数提供警告和替代方案"""
+            alternatives = {
+                "CONNECTION_ID": "使用应用层生成唯一标识符",
+                "DATABASE": "在应用层配置数据库名称",
+                "SCHEMA": "在应用层配置模式名称",
+                "USER": "在应用层获取用户信息",
+                "VERSION": "查询炎凰数据系统表获取版本信息"
+            }
+            
+            alternative = alternatives.get(func_name, "请在应用层处理系统信息需求")
+            
+            print(f"⚠️  警告: {func_name}() 函数在炎凰数据中不支持")
+            print(f"   替代方案: {alternative}")
+            
+            return f"/* {func_name}不支持，建议: {alternative} */ NULL"
+
+        def _unsupported_function_sql(self, func_name: str, expression: exp.Anonymous) -> str:
+            """为完全不支持的函数提供警告和替代方案"""
+            alternatives = {
+                "JSON_OBJECT": "炎凰数据不支持JSON对象构造，建议在应用层处理JSON",
+                "JSON_OBJECTAGG": "炎凰数据不支持JSON聚合，建议在应用层处理JSON",
+                "JSON_TABLE": "炎凰数据不支持JSON表函数，建议使用JSON_POINTER函数",
+                "JSONB_EXISTS": "炎凰数据不支持JSONB类型，建议使用JSON_POINTER函数",
+                "XMLELEMENT": "炎凰数据不支持XML函数，建议在应用层处理XML",
+                "XMLTABLE": "炎凰数据不支持XML表函数，建议在应用层处理XML",
+                "GAP_FILL": "炎凰数据不支持时间序列填充，建议使用generate_series表函数",
+                "OPENJSON": "炎凰数据不支持OPENJSON，建议使用JSON_POINTER函数",
+                "NORMALIZE": "炎凰数据不支持Unicode规范化，建议在应用层处理",
+                "OVERLAY": "炎凰数据不支持OVERLAY函数，建议使用REPLACE函数"
+            }
+            
+            alternative = alternatives.get(func_name, "请查阅炎凰数据文档寻找等效函数")
+            
+            print(f"⚠️  警告: {func_name}() 函数在炎凰数据中不支持")
+            print(f"   替代方案: {alternative}")
+            
+            # 返回注释形式，保持SQL可执行性
+            args_str = ", ".join(self.sql(arg) for arg in expression.expressions)
+            return f"/* {func_name}不支持，建议: {alternative} */ NULL"
 
 # 添加兼容性检查函数
 def check_yanhuang_compatibility(expression: exp.Expression) -> list[str]:
