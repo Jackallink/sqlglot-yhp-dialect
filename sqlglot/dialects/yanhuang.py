@@ -365,12 +365,12 @@ def _generate_uuid_to_uuid(args: t.List) -> exp.Anonymous:
     return exp.Anonymous(this="UUID", expressions=args)
 
 
-def _cardinality_to_array_size(args: t.List) -> exp.Anonymous:
-    """将CARDINALITY函数映射为ARRAY_SIZE函数
+def _cardinality_to_array_length(args: t.List) -> exp.Anonymous:
+    """将CARDINALITY函数映射为ARRAY_LENGTH函数
     
-    CARDINALITY(array) -> ARRAY_SIZE(array)
+    CARDINALITY(array) -> ARRAY_LENGTH(array)
     """
-    return exp.Anonymous(this="ARRAY_SIZE", expressions=args)
+    return exp.Anonymous(this="ARRAY_LENGTH", expressions=args)
 
 
 def _split_to_array_split(args: t.List) -> exp.Anonymous:
@@ -665,6 +665,29 @@ def _current_user_mapping(args: t.List) -> exp.Anonymous:
     # PostgreSQL的CURRENT_USER在炎凰SQL中映射为USER()
     return exp.Anonymous(this="USER", expressions=args)
 
+def _unsupported_function_warning(func_name: str, func_type: str, args: t.List) -> exp.Anonymous:
+    """为不支持的函数生成告警并返回原函数调用
+    
+    Args:
+        func_name: 函数名
+        func_type: 函数类型描述
+        args: 函数参数
+    
+    Returns:
+        原函数调用的Anonymous表达式，但会在运行时产生告警
+    """
+    import warnings
+    
+    # 发出警告
+    warnings.warn(
+        f"炎凰数据不支持{func_type} {func_name}。此函数调用可能在运行时失败。",
+        UserWarning,
+        stacklevel=3
+    )
+    
+    # 返回原函数调用，让运行时处理错误
+    return exp.Anonymous(this=func_name, expressions=args)
+
 
 def _make_time_mapping(args: t.List) -> exp.Anonymous:
     """将MAKE_TIME映射为STRPTIME + CONCAT组合
@@ -950,6 +973,7 @@ class Yanhuang(Postgres):
     COPY_PARAMS_ARE_CSV = False
     HEX_LOWERCASE = True
     HAS_DISTINCT_ARRAY_CONSTRUCTORS = True
+    VALUES_AS_TABLE = True  # 炎凰数据原生支持VALUES语法
 
     # ref: https://docs.aws.amazon.com/redshift/latest/dg/r_FORMAT_strings.html
     TIME_FORMAT = "'YYYY-MM-DD HH24:MI:SS'"
@@ -1001,8 +1025,8 @@ class Yanhuang(Postgres):
             # 3. 数组函数映射  
             # UNNEST在TABLE_FUNCTIONS中定义，这里不重复定义避免冲突
             # "UNNEST": _unnest_to_flatten,  # UNNEST降级映射为FLATTEN（表函数）
-            "ARRAY_LENGTH": _array_length_to_array_size,  # ARRAY_LENGTH映射为ARRAY_SIZE
-            "CARDINALITY": _cardinality_to_array_size,  # CARDINALITY映射为ARRAY_SIZE  
+            # "ARRAY_LENGTH": _array_length_to_array_size,  # 移除：炎凰数据原生支持ARRAY_LENGTH函数
+            "CARDINALITY": _cardinality_to_array_length,  # CARDINALITY映射为ARRAY_LENGTH  
             "ARRAY_CONCAT": _array_concat_to_array_cat,  # ARRAY_CONCAT映射为ARRAY_CAT
             "ARRAY_TO_STRING": _array_to_string_to_array_join,  # ARRAY_TO_STRING映射为ARRAY_JOIN
             "SPLIT": _split_to_array_split,  # SPLIT映射为ARRAY_SPLIT
@@ -1059,6 +1083,149 @@ class Yanhuang(Postgres):
             # 13. 类型转换函数映射（虚拟继承函数）
             "SAFE_CAST": lambda args: exp.Anonymous(this="SAFE_CAST", expressions=args),
             "TRY_CAST": lambda args: exp.Anonymous(this="TRY_CAST", expressions=args),
+            
+            # ===== 基于炎凰数据官方文档验证的新增函数映射 =====
+            
+            # 14. 时间函数增量映射（需要映射的PostgreSQL函数）
+            "CLOCK_TIMESTAMP": lambda args: exp.Anonymous(this="NOW", expressions=[]),  # 映射为NOW()
+            "STATEMENT_TIMESTAMP": lambda args: exp.Anonymous(this="NOW", expressions=[]),  # 映射为NOW()
+            "TRANSACTION_TIMESTAMP": lambda args: exp.Anonymous(this="NOW", expressions=[]),  # 映射为NOW()
+            "TIMEOFDAY": lambda args: exp.Anonymous(this="STRFTIME", expressions=[exp.Anonymous(this="NOW", expressions=[]), exp.Literal.string("%a %b %d %H:%M:%S.%f %Y %Z")]),  # 映射为STRFTIME(NOW(), format)
+            "LOCALTIMESTAMP": lambda args: exp.Anonymous(this="NOW", expressions=[]),  # 映射为NOW()
+            
+            # 15. 字符串函数增量映射（需要映射的PostgreSQL函数）
+            # 注意：炎凰数据不支持QUOTE_IDENT等函数，需要告警处理
+            # "QUOTE_IDENT": lambda args: exp.Anonymous(this="QUOTE", expressions=args),  # 移除：炎凰数据不支持标识符引用函数
+            # "QUOTE_LITERAL": lambda args: exp.Anonymous(this="QUOTE", expressions=args),  # 移除：炎凰数据不支持字面量引用函数
+            # "QUOTE_NULLABLE": lambda args: exp.Anonymous(this="QUOTE", expressions=args),  # 移除：炎凰数据不支持可空值引用函数
+            
+            # 16. 数组函数增量映射（需要映射的PostgreSQL函数）
+            # 注意：炎凰数据只支持一维数组，不需要维度函数
+            # "ARRAY_DIMS": lambda args: exp.Anonymous(this="ARRAY_SIZE", expressions=args),  # 移除：炎凰数据不支持数组维度函数
+            # "ARRAY_UPPER": 移除错误映射，炎凰数据不支持ARRAY_UPPER函数
+            # ARRAY_UPPER: 移除错误映射，炎凰数据不支持ARRAY_UPPER函数，已在告警函数中处理
+            "ARRAY_NDIMS": lambda args: exp.Literal.number("1"),  # 炎凰数据只支持一维数组
+            # "ARRAY_APPEND": 移除错误映射，炎凰数据原生支持ARRAY_APPEND函数
+            # "ARRAY_PREPEND": 移除错误映射，炎凰数据原生支持ARRAY_PREPEND函数
+            "ARRAY_REMOVE": lambda args: exp.Anonymous(this="ARRAY_FILTER", expressions=args),  # 映射为ARRAY_FILTER的否定形式
+            "ARRAY_REPLACE": lambda args: exp.Anonymous(this="ARRAY_REPLACE", expressions=args),  # 假设炎凰数据支持ARRAY_REPLACE
+            
+            # ===== 不支持函数的映射/降级/告警处理 =====
+            
+            # 18. 系统信息函数（不支持，提供告警）
+            "PG_BACKEND_PID": lambda args: _unsupported_function_warning("PG_BACKEND_PID", "PostgreSQL系统函数", args),
+            "PG_CANCEL_BACKEND": lambda args: _unsupported_function_warning("PG_CANCEL_BACKEND", "PostgreSQL系统函数", args),
+            "VERSION": lambda args: _unsupported_function_warning("VERSION", "系统版本函数", args),
+            "CURRENT_DATABASE": lambda args: _unsupported_function_warning("CURRENT_DATABASE", "当前数据库函数", args),
+            "CURRENT_SCHEMA": lambda args: _unsupported_function_warning("CURRENT_SCHEMA", "当前模式函数", args),
+            
+            # 19. 网络地址函数（不支持，提供告警）
+            "INET": lambda args: _unsupported_function_warning("INET", "网络地址函数", args),
+            "ABBREV": lambda args: _unsupported_function_warning("ABBREV", "地址缩写函数", args),
+            "BROADCAST": lambda args: _unsupported_function_warning("BROADCAST", "广播地址函数", args),
+            "FAMILY": lambda args: _unsupported_function_warning("FAMILY", "地址族函数", args),
+            "HOST": lambda args: _unsupported_function_warning("HOST", "主机地址函数", args),
+            "HOSTMASK": lambda args: _unsupported_function_warning("HOSTMASK", "主机掩码函数", args),
+            "MASKLEN": lambda args: _unsupported_function_warning("MASKLEN", "掩码长度函数", args),
+            "NETMASK": lambda args: _unsupported_function_warning("NETMASK", "网络掩码函数", args),
+            "NETWORK": lambda args: _unsupported_function_warning("NETWORK", "网络地址函数", args),
+            "SET_MASKLEN": lambda args: _unsupported_function_warning("SET_MASKLEN", "设置掩码长度函数", args),
+            
+            # 20. 全文搜索函数（不支持，提供告警）
+            "TO_TSVECTOR": lambda args: _unsupported_function_warning("TO_TSVECTOR", "全文搜索函数", args),
+            "TO_TSQUERY": lambda args: _unsupported_function_warning("TO_TSQUERY", "全文搜索函数", args),
+            "PLAINTO_TSQUERY": lambda args: _unsupported_function_warning("PLAINTO_TSQUERY", "全文搜索函数", args),
+            "PHRASETO_TSQUERY": lambda args: _unsupported_function_warning("PHRASETO_TSQUERY", "全文搜索函数", args),
+            "WEBSEARCH_TO_TSQUERY": lambda args: _unsupported_function_warning("WEBSEARCH_TO_TSQUERY", "全文搜索函数", args),
+            "TS_RANK": lambda args: _unsupported_function_warning("TS_RANK", "全文搜索排名函数", args),
+            "TS_RANK_CD": lambda args: _unsupported_function_warning("TS_RANK_CD", "全文搜索排名函数", args),
+            "TS_HEADLINE": lambda args: _unsupported_function_warning("TS_HEADLINE", "全文搜索标题函数", args),
+            "TS_REWRITE": lambda args: _unsupported_function_warning("TS_REWRITE", "全文搜索重写函数", args),
+            "TSQUERY_PHRASE": lambda args: _unsupported_function_warning("TSQUERY_PHRASE", "全文搜索查询函数", args),
+            "TSVECTOR_TO_ARRAY": lambda args: _unsupported_function_warning("TSVECTOR_TO_ARRAY", "全文搜索函数", args),
+            
+            # 21. 几何函数（不支持，提供告警）
+            "POINT": lambda args: _unsupported_function_warning("POINT", "几何函数", args),
+            "LINE": lambda args: _unsupported_function_warning("LINE", "几何函数", args),
+            "LSEG": lambda args: _unsupported_function_warning("LSEG", "几何函数", args),
+            "BOX": lambda args: _unsupported_function_warning("BOX", "几何函数", args),
+            "PATH": lambda args: _unsupported_function_warning("PATH", "几何函数", args),
+            "POLYGON": lambda args: _unsupported_function_warning("POLYGON", "几何函数", args),
+            "CIRCLE": lambda args: _unsupported_function_warning("CIRCLE", "几何函数", args),
+            "AREA": lambda args: _unsupported_function_warning("AREA", "几何函数", args),
+            "CENTER": lambda args: _unsupported_function_warning("CENTER", "几何函数", args),
+            "DIAMETER": lambda args: _unsupported_function_warning("DIAMETER", "几何函数", args),
+            "HEIGHT": lambda args: _unsupported_function_warning("HEIGHT", "几何函数", args),
+            "ISCLOSED": lambda args: _unsupported_function_warning("ISCLOSED", "几何函数", args),
+            "ISOPEN": lambda args: _unsupported_function_warning("ISOPEN", "几何函数", args),
+            "NPOINTS": lambda args: _unsupported_function_warning("NPOINTS", "几何函数", args),
+            "PCLOSE": lambda args: _unsupported_function_warning("PCLOSE", "几何函数", args),
+            "POPEN": lambda args: _unsupported_function_warning("POPEN", "几何函数", args),
+            "RADIUS": lambda args: _unsupported_function_warning("RADIUS", "几何函数", args),
+            "WIDTH": lambda args: _unsupported_function_warning("WIDTH", "几何函数", args),
+            
+            # 22. XML函数（不支持，提供告警）
+            "XMLPARSE": lambda args: _unsupported_function_warning("XMLPARSE", "XML函数", args),
+            "XMLSERIALIZE": lambda args: _unsupported_function_warning("XMLSERIALIZE", "XML函数", args),
+            "XMLCOMMENT": lambda args: _unsupported_function_warning("XMLCOMMENT", "XML函数", args),
+            "XMLCONCAT": lambda args: _unsupported_function_warning("XMLCONCAT", "XML函数", args),
+            "XMLELEMENT": lambda args: _unsupported_function_warning("XMLELEMENT", "XML函数", args),
+            "XMLFOREST": lambda args: _unsupported_function_warning("XMLFOREST", "XML函数", args),
+            "XMLPI": lambda args: _unsupported_function_warning("XMLPI", "XML函数", args),
+            "XMLROOT": lambda args: _unsupported_function_warning("XMLROOT", "XML函数", args),
+            "XMLEXISTS": lambda args: _unsupported_function_warning("XMLEXISTS", "XML函数", args),
+            "XPATH_EXISTS": lambda args: _unsupported_function_warning("XPATH_EXISTS", "XML函数", args),
+            "XMLTABLE": lambda args: _unsupported_function_warning("XMLTABLE", "XML函数", args),
+            "TABLE_TO_XML": lambda args: _unsupported_function_warning("TABLE_TO_XML", "XML函数", args),
+            "QUERY_TO_XML": lambda args: _unsupported_function_warning("QUERY_TO_XML", "XML函数", args),
+            
+            # 23. 字符串引用函数（不支持，提供告警）
+            "QUOTE_IDENT": lambda args: _unsupported_function_warning("QUOTE_IDENT", "标识符引用函数", args),
+            "QUOTE_LITERAL": lambda args: _unsupported_function_warning("QUOTE_LITERAL", "字面量引用函数", args),
+            "QUOTE_NULLABLE": lambda args: _unsupported_function_warning("QUOTE_NULLABLE", "可空值引用函数", args),
+            
+            # 24. 数组维度函数（不支持，提供告警）
+            "ARRAY_DIMS": lambda args: _unsupported_function_warning("ARRAY_DIMS", "数组维度函数", args),
+            "ARRAY_LOWER": lambda args: _unsupported_function_warning("ARRAY_LOWER", "数组下界函数", args),
+            "ARRAY_UPPER": lambda args: _unsupported_function_warning("ARRAY_UPPER", "数组上界函数", args),
+            
+            # 25. 聚合函数（不支持，提供告警）
+            "ARRAY_AGG": lambda args: _unsupported_function_warning("ARRAY_AGG", "数组聚合函数", args),
+            "JSON_AGG": lambda args: _unsupported_function_warning("JSON_AGG", "JSON聚合函数", args),
+            "JSONB_AGG": lambda args: _unsupported_function_warning("JSONB_AGG", "JSONB聚合函数", args),
+            "BIT_AND": lambda args: _unsupported_function_warning("BIT_AND", "位运算聚合函数", args),
+            "BIT_OR": lambda args: _unsupported_function_warning("BIT_OR", "位运算聚合函数", args),
+            "MODE": lambda args: _unsupported_function_warning("MODE", "众数聚合函数", args),
+            
+            # 26. 窗口函数（不支持，提供告警）
+            "NTH_VALUE": lambda args: _unsupported_function_warning("NTH_VALUE", "窗口函数", args),
+            
+            # 27. JSON表函数（不支持，提供告警）
+            "JSON_ARRAY_ELEMENTS": lambda args: _unsupported_function_warning("JSON_ARRAY_ELEMENTS", "JSON表函数", args),
+            "JSON_EACH": lambda args: _unsupported_function_warning("JSON_EACH", "JSON表函数", args),
+            "JSON_OBJECT_KEYS": lambda args: _unsupported_function_warning("JSON_OBJECT_KEYS", "JSON表函数", args),
+            "JSON_POPULATE_RECORD": lambda args: _unsupported_function_warning("JSON_POPULATE_RECORD", "JSON表函数", args),
+            "JSON_POPULATE_RECORDSET": lambda args: _unsupported_function_warning("JSON_POPULATE_RECORDSET", "JSON表函数", args),
+            "JSON_STRIP_NULLS": lambda args: _unsupported_function_warning("JSON_STRIP_NULLS", "JSON表函数", args),
+            "JSON_TO_RECORD": lambda args: _unsupported_function_warning("JSON_TO_RECORD", "JSON表函数", args),
+            "JSON_TO_RECORDSET": lambda args: _unsupported_function_warning("JSON_TO_RECORDSET", "JSON表函数", args),
+            "JSONB_ARRAY_ELEMENTS": lambda args: _unsupported_function_warning("JSONB_ARRAY_ELEMENTS", "JSONB表函数", args),
+            "JSONB_EACH": lambda args: _unsupported_function_warning("JSONB_EACH", "JSONB表函数", args),
+            "JSONB_OBJECT_KEYS": lambda args: _unsupported_function_warning("JSONB_OBJECT_KEYS", "JSONB表函数", args),
+            "JSONB_POPULATE_RECORD": lambda args: _unsupported_function_warning("JSONB_POPULATE_RECORD", "JSONB表函数", args),
+            "JSONB_POPULATE_RECORDSET": lambda args: _unsupported_function_warning("JSONB_POPULATE_RECORDSET", "JSONB表函数", args),
+            "JSONB_STRIP_NULLS": lambda args: _unsupported_function_warning("JSONB_STRIP_NULLS", "JSONB表函数", args),
+            "JSONB_TO_RECORD": lambda args: _unsupported_function_warning("JSONB_TO_RECORD", "JSONB表函数", args),
+            "JSONB_TO_RECORDSET": lambda args: _unsupported_function_warning("JSONB_TO_RECORDSET", "JSONB表函数", args),
+            
+            # 17. 聚合函数增量映射（需要映射的PostgreSQL函数）
+            # 注意：以下函数炎凰数据不支持，需要告警或降级处理
+            # "CORR": lambda args: exp.Anonymous(this="CORR", expressions=args),  # 移除：炎凰数据不支持相关系数函数
+            # "COVAR_POP": lambda args: exp.Anonymous(this="COVAR_POP", expressions=args),  # 移除：炎凰数据不支持协方差函数
+            # "COVAR_SAMP": lambda args: exp.Anonymous(this="COVAR_SAMP", expressions=args),  # 移除：炎凰数据不支持协方差函数
+            # "REGR_SLOPE": lambda args: exp.Anonymous(this="REGR_SLOPE", expressions=args),  # 移除：炎凰数据不支持回归函数
+            # "REGR_INTERCEPT": lambda args: exp.Anonymous(this="REGR_INTERCEPT", expressions=args),  # 移除：炎凰数据不支持回归函数
+            # "REGR_R2": lambda args: exp.Anonymous(this="REGR_R2", expressions=args),  # 移除：炎凰数据不支持回归函数
             
             # ===== 炎凰SQL原生支持函数（147个，无需映射） =====
             
@@ -1393,6 +1560,57 @@ class Yanhuang(Postgres):
             "SAVED_SEARCH": lambda args: exp.Anonymous(this="SAVED_SEARCH", expressions=args),
             "CURRENT_JOB_META": lambda args: exp.Anonymous(this="CURRENT_JOB_META", expressions=args),
             "GENERATE_TIME_BUCKETS": lambda args: exp.Anonymous(this="GENERATE_TIME_BUCKETS", expressions=args),
+            
+            # ===== 基于炎凰数据官方文档验证的新增函数映射 =====
+            
+            # 14. 字符串拼接函数（炎凰数据原生支持）
+            "CONCAT_WS": lambda args: exp.Anonymous(this="CONCAT_WS", expressions=args),  # 原生支持，最多5个字符串
+            
+            # 15. 聚合字符串拼接函数（炎凰数据原生支持）
+            "STRING_AGG": lambda args: exp.Anonymous(this="STRING_AGG", expressions=args),  # 原生支持聚合字符串拼接
+            
+            # 16. 字符串分割函数（炎凰数据原生支持）
+            "SPLIT_PART": lambda args: exp.Anonymous(this="SPLIT_PART", expressions=args),  # 原生支持字符串分割
+            
+            # 17. 时间函数增量映射（需要映射的PostgreSQL函数）
+            # 注意：移除重复定义，保持第一个定义
+            # "CLOCK_TIMESTAMP": lambda args: exp.Anonymous(this="NOW", expressions=[]),  # 移除重复：已在第14节定义
+            # "STATEMENT_TIMESTAMP": lambda args: exp.Anonymous(this="NOW", expressions=[]),  # 移除重复：已在第14节定义
+            # "TRANSACTION_TIMESTAMP": lambda args: exp.Anonymous(this="NOW", expressions=[]),  # 移除重复：已在第14节定义
+            # "TIMEOFDAY": lambda args: exp.Anonymous(this="STRFTIME", expressions=[exp.Literal.string("%Y-%m-%d %H:%M:%S %Z")]),  # 移除重复：已在第14节定义
+            # "LOCALTIMESTAMP": lambda args: exp.Anonymous(this="NOW", expressions=[]),  # 移除重复：已在第14节定义
+            "DATE": lambda args: exp.Anonymous(this="CAST", expressions=[args[0] if args else exp.Anonymous(this="NOW", expressions=[]), exp.DataType.build("DATE")]),  # 映射为CAST(...AS DATE)
+            # "TIME": 移除错误的CAST映射，TIME函数在炎凰数据中用于GROUP BY时间分组，不是类型转换
+            
+            # 18. 字符串函数增量映射（需要映射的PostgreSQL函数）
+            # 注意：炎凰数据不支持QUOTE_IDENT等函数，已移除错误映射
+            # "QUOTE_IDENT": lambda args: exp.Anonymous(this="QUOTE", expressions=args),  # 移除：炎凰数据不支持标识符引用函数
+            # "QUOTE_LITERAL": lambda args: exp.Anonymous(this="QUOTE", expressions=args),  # 移除：炎凰数据不支持字面量引用函数
+            # "QUOTE_NULLABLE": lambda args: exp.Anonymous(this="QUOTE", expressions=args),  # 移除：炎凰数据不支持可空值引用函数
+            "FORMAT": lambda args: exp.Anonymous(this="FORMAT", expressions=args),  # 炎凰数据原生支持FORMAT
+            "INITCAP": lambda args: exp.Anonymous(this="INITCAP", expressions=args),  # 炎凰数据原生支持INITCAP
+            "LPAD": lambda args: exp.Anonymous(this="LPAD", expressions=args),  # 炎凰数据原生支持LPAD
+            "RPAD": lambda args: exp.Anonymous(this="RPAD", expressions=args),  # 炎凰数据原生支持RPAD
+            
+            # 19. 数组函数增量映射（需要映射的PostgreSQL函数）
+            # 注意：炎凰数据只支持一维数组，不需要维度函数
+            # "ARRAY_DIMS": lambda args: exp.Anonymous(this="ARRAY_SIZE", expressions=args),  # 移除：炎凰数据不支持数组维度函数
+            # "ARRAY_UPPER": 移除错误映射，炎凰数据不支持ARRAY_UPPER函数
+            # ARRAY_UPPER: 移除错误映射，炎凰数据不支持ARRAY_UPPER函数，已在告警函数中处理
+            "ARRAY_NDIMS": lambda args: exp.Literal.number("1"),  # 炎凰数据只支持一维数组
+            # "ARRAY_APPEND": 移除错误映射，炎凰数据原生支持ARRAY_APPEND函数
+            # "ARRAY_PREPEND": 移除错误映射，炎凰数据原生支持ARRAY_PREPEND函数
+            "ARRAY_REMOVE": lambda args: exp.Anonymous(this="ARRAY_FILTER", expressions=args),  # 映射为ARRAY_FILTER的否定形式
+            "ARRAY_REPLACE": lambda args: exp.Anonymous(this="ARRAY_REPLACE", expressions=args),  # 假设炎凰数据支持ARRAY_REPLACE
+            
+            # 20. 聚合函数增量映射（需要映射的PostgreSQL函数）
+            # 注意：以下函数炎凰数据不支持，已移除错误映射
+            # "CORR": lambda args: exp.Anonymous(this="CORR", expressions=args),  # 移除：炎凰数据不支持相关系数函数
+            # "COVAR_POP": lambda args: exp.Anonymous(this="COVAR_POP", expressions=args),  # 移除：炎凰数据不支持协方差函数
+            # "COVAR_SAMP": lambda args: exp.Anonymous(this="COVAR_SAMP", expressions=args),  # 移除：炎凰数据不支持协方差函数
+            # "REGR_SLOPE": lambda args: exp.Anonymous(this="REGR_SLOPE", expressions=args),  # 移除：炎凰数据不支持回归函数
+            # "REGR_INTERCEPT": lambda args: exp.Anonymous(this="REGR_INTERCEPT", expressions=args),  # 移除：炎凰数据不支持回归函数
+            # "REGR_R2": lambda args: exp.Anonymous(this="REGR_R2", expressions=args),  # 移除：炎凰数据不支持回归函数
         }
         
         # 重写FUNCTION_PARSERS来移除DECODE的特殊解析
@@ -1751,8 +1969,6 @@ class Yanhuang(Postgres):
 
     class Generator(Postgres.Generator):
         LOCKING_READS_SUPPORTED = False
-        QUERY_HINTS = False
-        VALUES_AS_TABLE = False
         TZ_TO_WITH_TIME_ZONE = True
         NVL2_SUPPORTED = True
         LAST_DAY_SUPPORTS_DATE_PART = False
@@ -1802,8 +2018,9 @@ class Yanhuang(Postgres):
         TRANSFORMS = {
             **Postgres.Generator.TRANSFORMS,
             exp.ArrayConcat: lambda self, e: self.arrayconcat_sql(e, name="ARRAY_CONCAT"),
+            # exp.ArraySize: lambda self, e: self.func("ARRAY_SIZE", e.this),  # 移除：炎凰数据原生支持ARRAY_LENGTH函数
             exp.Concat: lambda self, e: self.func("CONCAT", *e.expressions),
-            exp.ConcatWs: concat_ws_to_dpipe_sql,
+            # exp.ConcatWs: concat_ws_to_dpipe_sql,  # 移除：炎凰数据原生支持CONCAT_WS函数
             exp.ApproxDistinct: lambda self, e: f"APPROXIMATE COUNT(DISTINCT {self.sql(e, 'this')})",
             exp.CurrentTimestamp: lambda self, e: self.currenttimestamp_sql(e),
             exp.CurrentTime: lambda self, e: "STRFTIME(NOW(), '%H:%M:%S%z')",  # CURRENT_TIME映射为STRFTIME获取带时区TIME值
@@ -1898,7 +2115,7 @@ class Yanhuang(Postgres):
             # 第八批优化：中优先级虚继承函数转换
             exp.ArrayConcat: lambda self, e: self.func("ARRAY_CAT", *e.expressions),
             exp.Add: lambda self, e: self.func("DATE_ADD", e.this, e.expression.this, e.expression.unit) if isinstance(e.expression, exp.Interval) else self.binary(e, "+"),
-            exp.Anonymous: lambda self, e: self.func("DATE_DIFF", e.expressions[1], e.expressions[0]) if e.this == "AGE" and len(e.expressions) >= 2 else self.anonymous_sql(e),
+            exp.Anonymous: lambda self, e: self.func("DATE_DIFF", e.expressions[1], e.expressions[0]) if e.this == "AGE" and len(e.expressions) >= 2 else (self.func("ARRAY_LENGTH", e.expressions[0]) if e.this == "CARDINALITY" and len(e.expressions) == 1 else self.anonymous_sql(e)),
             exp.RegexpLike: lambda self, e: self.func("REGEXP_LIKE", e.this, e.expression),
             
             # 第九批优化：错误继承函数的复合映射转换

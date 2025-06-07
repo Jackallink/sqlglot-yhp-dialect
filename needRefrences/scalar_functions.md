@@ -157,6 +157,7 @@ SORENSEN_DICE_SIMILARITY(<str>,<str>)	计算两个字符串的Sørensen–Dice c
 SOUNDEX(<str>)	返回str的SOUNDEX值
 SPACE(<num>)	返回num个空白符' '
 SPLIT_PART(<base_str>, <split_str>, <index>)	用split_str把SPLIT_PARTbase_str分割，返回第index个分割值；例如SPLIT_PART('hello', 'll', 1)返回'he'
+SQRT(<x>)	计算x的平方根
 STARTS_WITH(<str>, <sub_str>)	检测字串str是否以sub_str开头，返回boolean；如果返回true，就表示第一个参数的值的开头是sub_str；如果是false，则表示不是以sub_str开头
 STRFTIME(<microsecond_since_epoch>, <format>)	把epoch以微秒为单位的时间戳microsecond_since_epoch根据给定的格式format转换成时间戳字符串，时区为偏好设置中的时区。format支持的格式可以参考这里。具体例子可以看这里
 STRFTIME(<microsecond_since_epoch>, <format>, <timezone>)	把epoch以微秒为单位的时间戳microsecond_since_epoch根据给定的格式format和时区timezone转换成时间戳字符串；format支持的格式可以参考这里；timezone参考这个页面的 TZ database name。具体例子可以看这里；某些场景中，亦可实现日期分桶的效果，参考用例
@@ -168,6 +169,7 @@ SUBSTRING(<str>, <start>)	同SUBSTR(<str>, <start>)
 SUBSTRING(<str>, <start>, <len>)	同SUBSTR(<str>, <start>, <len>)
 TAN(<x>)	计算x的正切值
 TANH(<x>)	计算x的双曲正切函数值
+TYPEOF(<expression>)	返回表达式的数据类型名称
 TIME_BUCKET(<time_unit>, <field>)	把field字段按照time_unit进行时间聚合，支持的单位为秒s，分钟m，小时h，天d，周w，月M，季度q，年y。例如TIME_BUCKET('1d', _time)可以将_time字段的时间聚合到以1天为单位的时间上。时间单位之前必须是一个正整数
 TIME_BUCKET(<time_unit>, <field>, <origin_timestamp>)	将桶的起始时间以origin_timestamp对齐，例如TIME_BUCKET('1d', _time,'2021-12-21T00:06:40.000+08:00')可以将_time字段的时间聚合到以1天为单位的时间上并以2021-12-21T00:06:40.000+08:00时间戳为分桶起点，假设_time为2021-08-07T09:12:13.000+08:00,则会输出2021-08-07T00:06:40.000+08:00
 TOP_LEVEL_DOMAIN(<utr>)	从 URL 中提取顶级域。例如:SELECT top_level_domain('svn+ssh://www.some.svn-hosting.com:80/repo/trunk');输出为com
