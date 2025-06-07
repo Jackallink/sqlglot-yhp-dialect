@@ -1104,7 +1104,7 @@ class Yanhuang(Postgres):
             # "ARRAY_DIMS": lambda args: exp.Anonymous(this="ARRAY_SIZE", expressions=args),  # 移除：炎凰数据不支持数组维度函数
             # "ARRAY_UPPER": 移除错误映射，炎凰数据不支持ARRAY_UPPER函数
             # ARRAY_UPPER: 移除错误映射，炎凰数据不支持ARRAY_UPPER函数，已在告警函数中处理
-            "ARRAY_NDIMS": lambda args: exp.Literal.number("1"),  # 炎凰数据只支持一维数组
+            # "ARRAY_NDIMS": 移除错误映射，炎凰数据不支持ARRAY_NDIMS函数
             # "ARRAY_APPEND": 移除错误映射，炎凰数据原生支持ARRAY_APPEND函数
             # "ARRAY_PREPEND": 移除错误映射，炎凰数据原生支持ARRAY_PREPEND函数
             "ARRAY_REMOVE": lambda args: exp.Anonymous(this="ARRAY_FILTER", expressions=args),  # 映射为ARRAY_FILTER的否定形式
@@ -1188,6 +1188,7 @@ class Yanhuang(Postgres):
             "ARRAY_DIMS": lambda args: _unsupported_function_warning("ARRAY_DIMS", "数组维度函数", args),
             "ARRAY_LOWER": lambda args: _unsupported_function_warning("ARRAY_LOWER", "数组下界函数", args),
             "ARRAY_UPPER": lambda args: _unsupported_function_warning("ARRAY_UPPER", "数组上界函数", args),
+            "ARRAY_NDIMS": lambda args: _unsupported_function_warning("ARRAY_NDIMS", "数组维数函数", args),
             
             # 25. 聚合函数（不支持，提供告警）
             "ARRAY_AGG": lambda args: _unsupported_function_warning("ARRAY_AGG", "数组聚合函数", args),
@@ -1597,7 +1598,7 @@ class Yanhuang(Postgres):
             # "ARRAY_DIMS": lambda args: exp.Anonymous(this="ARRAY_SIZE", expressions=args),  # 移除：炎凰数据不支持数组维度函数
             # "ARRAY_UPPER": 移除错误映射，炎凰数据不支持ARRAY_UPPER函数
             # ARRAY_UPPER: 移除错误映射，炎凰数据不支持ARRAY_UPPER函数，已在告警函数中处理
-            "ARRAY_NDIMS": lambda args: exp.Literal.number("1"),  # 炎凰数据只支持一维数组
+            # "ARRAY_NDIMS": 移除错误映射，炎凰数据不支持ARRAY_NDIMS函数
             # "ARRAY_APPEND": 移除错误映射，炎凰数据原生支持ARRAY_APPEND函数
             # "ARRAY_PREPEND": 移除错误映射，炎凰数据原生支持ARRAY_PREPEND函数
             "ARRAY_REMOVE": lambda args: exp.Anonymous(this="ARRAY_FILTER", expressions=args),  # 映射为ARRAY_FILTER的否定形式
@@ -2115,7 +2116,13 @@ class Yanhuang(Postgres):
             # 第八批优化：中优先级虚继承函数转换
             exp.ArrayConcat: lambda self, e: self.func("ARRAY_CAT", *e.expressions),
             exp.Add: lambda self, e: self.func("DATE_ADD", e.this, e.expression.this, e.expression.unit) if isinstance(e.expression, exp.Interval) else self.binary(e, "+"),
-            exp.Anonymous: lambda self, e: self.func("DATE_DIFF", e.expressions[1], e.expressions[0]) if e.this == "AGE" and len(e.expressions) >= 2 else (self.func("ARRAY_LENGTH", e.expressions[0]) if e.this == "CARDINALITY" and len(e.expressions) == 1 else self.anonymous_sql(e)),
+            exp.Anonymous: lambda self, e: (
+                self.func("DATE_DIFF", e.expressions[1], e.expressions[0]) if e.this == "AGE" and len(e.expressions) >= 2 
+                else self.func("ARRAY_LENGTH", e.expressions[0]) if e.this == "CARDINALITY" and len(e.expressions) == 1
+                else "NOW()" if e.this in ["CLOCK_TIMESTAMP", "STATEMENT_TIMESTAMP", "TRANSACTION_TIMESTAMP", "LOCALTIMESTAMP"] and len(e.expressions) == 0
+                # 移除ARRAY_LOWER和ARRAY_NDIMS的错误映射，这些函数应该产生告警
+                else self.anonymous_sql(e)
+            ),
             exp.RegexpLike: lambda self, e: self.func("REGEXP_LIKE", e.this, e.expression),
             
             # 第九批优化：错误继承函数的复合映射转换
