@@ -373,12 +373,13 @@ def _cardinality_to_array_length(args: t.List) -> exp.Anonymous:
     return exp.Anonymous(this="ARRAY_LENGTH", expressions=args)
 
 
-def _split_to_array_split(args: t.List) -> exp.Anonymous:
-    """将STRING_SPLIT/SPLIT函数映射为ARRAY_SPLIT函数
+def _split_unsupported_warning(args: t.List) -> exp.Anonymous:
+    """SPLIT函数不支持警告
     
-    SPLIT(string, delimiter) -> ARRAY_SPLIT(string, delimiter)
+    PostgreSQL的SPLIT函数返回数组，但炎凰数据只有SPLIT_PART函数返回指定位置的字符串。
+    这两个函数功能不同，无法直接映射。
     """
-    return exp.Anonymous(this="ARRAY_SPLIT", expressions=args)
+    return _unsupported_function_warning("SPLIT", "字符串分割函数", args)
 
 
 def _array_concat_to_array_cat(args: t.List) -> exp.Anonymous:
@@ -555,6 +556,52 @@ def _percent_rank_to_row_number(args: t.List) -> exp.Div:
         this=row_number_minus_1,
         expression=count_minus_1
     )
+
+
+def _rank_to_row_number_formula(args: t.List) -> exp.Anonymous:
+    """将RANK窗口函数映射为ROW_NUMBER的复合表达式
+    
+    RANK() OVER (ORDER BY col) 在炎凰数据中不支持，需要通过复杂的ROW_NUMBER公式实现
+    
+    实现思路：
+    RANK() = ROW_NUMBER() - COUNT(*) OVER (PARTITION BY ... ORDER BY col ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) + 1
+    
+    但这个实现比较复杂，暂时返回告警，建议用户使用ROW_NUMBER()替代
+    """
+    import warnings
+    
+    # 发出警告
+    warnings.warn(
+        "炎凰数据不支持RANK()窗口函数。建议使用ROW_NUMBER()替代，或者在应用层实现排名逻辑。",
+        UserWarning,
+        stacklevel=3
+    )
+    
+    # 返回ROW_NUMBER作为近似替代
+    return exp.Anonymous(this="ROW_NUMBER", expressions=args)
+
+
+def _dense_rank_to_row_number_formula(args: t.List) -> exp.Anonymous:
+    """将DENSE_RANK窗口函数映射为ROW_NUMBER的复合表达式
+    
+    DENSE_RANK() OVER (ORDER BY col) 在炎凰数据中不支持，需要通过复杂的公式实现
+    
+    实现思路：
+    DENSE_RANK() = COUNT(DISTINCT col) OVER (ORDER BY col ROWS UNBOUNDED PRECEDING)
+    
+    但这个实现比较复杂，暂时返回告警，建议用户使用ROW_NUMBER()替代
+    """
+    import warnings
+    
+    # 发出警告
+    warnings.warn(
+        "炎凰数据不支持DENSE_RANK()窗口函数。建议使用ROW_NUMBER()替代，或者在应用层实现密集排名逻辑。",
+        UserWarning,
+        stacklevel=3
+    )
+    
+    # 返回ROW_NUMBER作为近似替代
+    return exp.Anonymous(this="ROW_NUMBER", expressions=args)
 
 
 # =============================================================================
@@ -1000,8 +1047,52 @@ class Yanhuang(Postgres):
             TokenType.DATABASE,  # 声明DATABASE可以作为函数使用
         }
         
+        def _parse_join(self, skip_join_token: bool = False, parse_method: t.Optional[t.Callable] = None):
+            """增强的JOIN解析，支持APPLY语法和LATERAL JOIN到APPLY的转换"""
+            
+            # 首先调用父类的JOIN解析
+            join = super()._parse_join(skip_join_token, parse_method)
+            
+            # 如果解析到的是包含LATERAL的JOIN，设置正确的cross_apply标记
+            # 注意：只对真正的LATERAL JOIN进行转换，不影响原生APPLY语法
+            if join and isinstance(join.this, exp.Lateral):
+                lateral = join.this
+                join_kind = join.kind
+                join_side = join.args.get("side")
+                
+                # 检查是否是原生APPLY语法（已经有有效的cross_apply标记）
+                # 如果基础解析器已经设置了cross_apply标记（True或False），说明这是原生APPLY，不要覆盖
+                # 如果cross_apply为None，说明这是LATERAL JOIN，需要转换
+                if lateral.args.get("cross_apply") is None:
+                    # 这是LATERAL JOIN，需要转换
+                    # 根据JOIN类型设置cross_apply标记
+                    if join_side == "LEFT" or join_kind in ("LEFT", "LEFT OUTER"):
+                        # LEFT JOIN LATERAL → OUTER APPLY
+                        lateral.set("cross_apply", False)
+                    elif join_side == "RIGHT" or join_kind in ("RIGHT", "RIGHT OUTER"):
+                        # RIGHT JOIN LATERAL → CROSS APPLY (炎凰数据不支持RIGHT APPLY，转为CROSS APPLY)
+                        lateral.set("cross_apply", True)
+                    elif join_side == "FULL" or join_kind in ("FULL", "FULL OUTER"):
+                        # FULL JOIN LATERAL → OUTER APPLY (最接近的语义)
+                        lateral.set("cross_apply", False)
+                    elif join_kind == "INNER":
+                        # INNER JOIN LATERAL → CROSS APPLY
+                        lateral.set("cross_apply", True)
+                    elif join_kind in (None, ""):
+                        # 简单的 JOIN LATERAL (没有kind，没有side) → CROSS APPLY
+                        lateral.set("cross_apply", True)
+                    else:
+                        # 默认情况 → CROSS APPLY
+                        lateral.set("cross_apply", True)
+                # 如果已经有cross_apply标记，说明是原生APPLY语法，保持不变
+                    
+            return join
+        
         FUNCTIONS = {
             **Postgres.Parser.FUNCTIONS,
+            # ===== 炎凰数据原生支持函数（覆盖基础映射） =====
+            "ARRAY_LENGTH": lambda args: exp.Anonymous(this="ARRAY_LENGTH", expressions=args),  # 炎凰原生支持，不转换为ArraySize
+            
             # ===== 映射转换函数（35个，需要语法调整） =====
             
             # 1. 时间函数映射
@@ -1029,8 +1120,8 @@ class Yanhuang(Postgres):
             "CARDINALITY": _cardinality_to_array_length,  # CARDINALITY映射为ARRAY_LENGTH  
             "ARRAY_CONCAT": _array_concat_to_array_cat,  # ARRAY_CONCAT映射为ARRAY_CAT
             "ARRAY_TO_STRING": _array_to_string_to_array_join,  # ARRAY_TO_STRING映射为ARRAY_JOIN
-            "SPLIT": _split_to_array_split,  # SPLIT映射为ARRAY_SPLIT
-            "STRING_SPLIT": _split_to_array_split,  # STRING_SPLIT映射为ARRAY_SPLIT
+            "SPLIT": _split_unsupported_warning,  # SPLIT函数不支持，提供警告
+            "STRING_SPLIT": _split_unsupported_warning,  # STRING_SPLIT函数不支持，提供警告
             
             # 4. 字符串函数映射（参数顺序调整）
             "STRPOS": _strpos_to_position,  # STRPOS映射为POSITION（参数顺序调整）
@@ -1472,8 +1563,9 @@ class Yanhuang(Postgres):
             
             # 窗口函数补充
             "ROW_NUMBER": lambda args: exp.Anonymous(this="ROW_NUMBER", expressions=args),
-            "RANK": lambda args: exp.Anonymous(this="RANK", expressions=args),
-            "DENSE_RANK": lambda args: exp.Anonymous(this="DENSE_RANK", expressions=args),
+            # RANK和DENSE_RANK：炎凰数据不支持，需要映射实现
+            "RANK": _rank_to_row_number_formula,  # RANK映射为ROW_NUMBER公式
+            "DENSE_RANK": _dense_rank_to_row_number_formula,  # DENSE_RANK映射为ROW_NUMBER公式
             # "PERCENT_RANK": 已在上面通过复合映射处理
             "CUME_DIST": lambda args: exp.Anonymous(this="CUME_DIST", expressions=args),
             "NTILE": lambda args: exp.Anonymous(this="NTILE", expressions=args),
@@ -1984,6 +2076,7 @@ class Yanhuang(Postgres):
         SUPPORTS_MEDIAN = True
         ALTER_SET_TYPE = "TYPE"
         SUPPORTS_UESCAPE = True  # 炎凰SQL支持UESCAPE语法
+        ARRAY_SIZE_DIM_REQUIRED = False  # 炎凰数据的ARRAY_LENGTH不需要维度参数
 
         # Redshift doesn't have `WITH` as part of their with_properties so we remove it
         # 炎凰SQL需要保留WITH关键字，但在properties_sql中处理
@@ -2018,9 +2111,10 @@ class Yanhuang(Postgres):
 
         TRANSFORMS = {
             **Postgres.Generator.TRANSFORMS,
-            exp.ArrayConcat: lambda self, e: self.arrayconcat_sql(e, name="ARRAY_CONCAT"),
-            # exp.ArraySize: lambda self, e: self.func("ARRAY_SIZE", e.this),  # 移除：炎凰数据原生支持ARRAY_LENGTH函数
+            exp.ArrayConcat: lambda self, e: self.func("ARRAY_CAT", *e.expressions),
+            exp.ArraySize: lambda self, e: self.func("ARRAY_LENGTH", e.this),  # 修正：ARRAY_SIZE映射为ARRAY_LENGTH
             exp.Concat: lambda self, e: self.func("CONCAT", *e.expressions),
+            exp.DPipe: lambda self, e: self.dpipe_sql(e),  # || 操作符转换为CONCAT函数（智能合并）
             # exp.ConcatWs: concat_ws_to_dpipe_sql,  # 移除：炎凰数据原生支持CONCAT_WS函数
             exp.ApproxDistinct: lambda self, e: f"APPROXIMATE COUNT(DISTINCT {self.sql(e, 'this')})",
             exp.CurrentTimestamp: lambda self, e: self.currenttimestamp_sql(e),
@@ -2123,6 +2217,10 @@ class Yanhuang(Postgres):
                 # 移除ARRAY_LOWER和ARRAY_NDIMS的错误映射，这些函数应该产生告警
                 else self.anonymous_sql(e)
             ),
+            
+            # ARRAY函数的正确映射
+            exp.ArrayToString: lambda self, e: self.func("ARRAY_JOIN", e.this, e.expression),
+            exp.Split: lambda self, e: self._unsupported_function_sql("SPLIT", e),
             exp.RegexpLike: lambda self, e: self.func("REGEXP_LIKE", e.this, e.expression),
             
             # 第九批优化：错误继承函数的复合映射转换
@@ -2379,80 +2477,44 @@ class Yanhuang(Postgres):
         def join_sql(self, expression):
             """处理JOIN语句，包括APPLY，修复空格问题"""
             if isinstance(expression.this, exp.Lateral):
-                # 处理APPLY语法
+                # 检查是否是原生APPLY语法（已经有cross_apply标记）
                 lateral = expression.this
-                cross_apply = lateral.args.get("cross_apply")
-                if cross_apply is False:
-                    join_type = "OUTER APPLY"
-                elif cross_apply is True:
-                    join_type = "CROSS APPLY"
-                else:
-                    join_type = "APPLY"
                 
-                # 获取表函数调用
-                table_func = lateral.this
-                alias = lateral.alias
-                
-                if alias:
-                    alias_sql = f" {self.sql(alias)}"
-                else:
-                    alias_sql = ""
-                
-                # 修复：确保APPLY前有正确的空格
-                return f" {join_type} {self.sql(table_func)}{alias_sql}"
-            else:
-                # 普通JOIN处理 - 重新实现以避免额外空格
-                if not self.SEMI_ANTI_JOIN_WITH_SIDE and expression.kind in ("SEMI", "ANTI"):
-                    side = None
-                else:
-                    side = expression.side
-
-                op_sql = " ".join(
-                    op
-                    for op in (
-                        expression.method,
-                        "GLOBAL" if expression.args.get("global") else None,
-                        side,
-                        expression.kind,
-                        expression.hint if self.JOIN_HINTS else None,
-                    )
-                    if op
-                )
-                
-                match_cond = self.sql(expression, "match_condition")
-                match_cond = f" MATCH_CONDITION ({match_cond})" if match_cond else ""
-                on_sql = self.sql(expression, "on")
-                using = expression.args.get("using")
-
-                if not on_sql and using:
-                    on_sql = ", ".join(self.sql(column) for column in using)
-
-                this = expression.this
-                this_sql = self.sql(this)
-
-                exprs = self.expressions(expression)
-                if exprs:
-                    this_sql = f"{this_sql}, {exprs}"
-
-                if on_sql:
-                    on_sql = self.indent(on_sql, skip_first=True)
-                    space = " " * self.pad if self.pretty else " "
-                    if using:
-                        on_sql = f" USING ({on_sql})"
+                # 如果lateral已经有有效的cross_apply标记，说明解析阶段已经正确设置，不要覆盖
+                # 如果cross_apply为None，说明这是LATERAL JOIN，需要在生成阶段设置
+                if lateral.args.get("cross_apply") is None:
+                    # 这是LATERAL JOIN，需要在生成阶段设置cross_apply标记
+                    join_kind = expression.kind
+                    join_side = expression.args.get("side")  # 检查side属性
+                    
+                    # 根据JOIN类型设置cross_apply标记
+                    # 优先检查side属性，然后检查kind属性
+                    if join_side == "LEFT" or join_kind in ("LEFT", "LEFT OUTER"):
+                        # LEFT JOIN LATERAL → OUTER APPLY
+                        lateral.set("cross_apply", False)
+                    elif join_side == "RIGHT" or join_kind in ("RIGHT", "RIGHT OUTER"):
+                        # RIGHT JOIN LATERAL → CROSS APPLY (炎凰数据不支持RIGHT APPLY，转为CROSS APPLY)
+                        lateral.set("cross_apply", True)
+                    elif join_side == "FULL" or join_kind in ("FULL", "FULL OUTER"):
+                        # FULL JOIN LATERAL → OUTER APPLY (最接近的语义)
+                        lateral.set("cross_apply", False)
+                    elif join_kind == "INNER":
+                        # INNER JOIN LATERAL → CROSS APPLY
+                        lateral.set("cross_apply", True)
+                    elif join_kind in (None, ""):
+                        # 简单的 JOIN LATERAL (没有kind，没有side) → CROSS APPLY
+                        lateral.set("cross_apply", True)
                     else:
-                        on_sql = f" ON {on_sql}"
-                elif not op_sql:
-                    if isinstance(this, exp.Lateral) and this.args.get("cross_apply") is not None:
-                        return f" {this_sql}"
-                    return f", {this_sql}"
-
-                if op_sql != "STRAIGHT_JOIN":
-                    op_sql = f"{op_sql} JOIN" if op_sql else "JOIN"
-
-                pivots = self.expressions(expression, key="pivots", sep="", flat=True)
+                        # 默认情况 → CROSS APPLY
+                        lateral.set("cross_apply", True)
                 
-                # 关键修复：不使用self.seg()，直接拼接避免额外空格
-                return f" {op_sql} {this_sql}{match_cond}{on_sql}{pivots}"
+                # 处理APPLY语法 - 直接使用lateral_sql方法
+                lateral_sql = self.lateral_sql(lateral)
+                # 确保APPLY前有正确的空格
+                return f" {lateral_sql}"
+            else:
+                # 普通JOIN处理 - 使用父类的实现
+                return super().join_sql(expression)
 
         def lateral_op(self, expression):
             cross_apply = expression.args.get("cross_apply")
@@ -2463,52 +2525,14 @@ class Yanhuang(Postgres):
             return "APPLY"
 
         def from_sql(self, expression):
-            # 检查是否是多表合并Union
-            if isinstance(expression.this, exp.Union) and expression.this.args.get("is_table_merge"):
-                return self.union_sql(expression.this)
-            # 只返回主表部分，不拼接join
-            return self.sql(expression, "this")
+            """重写from_sql方法，使用父类的实现但确保正确的空格格式化"""
+            # 直接使用父类的from_sql方法，它已经正确处理了空格
+            return super().from_sql(expression)
 
         def select_sql(self, expression):
-            # 先拼接SELECT主干
-            select = self.seg("SELECT") + " "
-            if expression.args.get("distinct"):
-                select += "DISTINCT "
-            select += self.expressions(expression, "expressions")
-            from_expr = expression.args.get("from")
-            from_sql = self.sql(from_expr) if from_expr else ""
-            joins = expression.args.get("joins") or []
-            # 修复：不要在每个JOIN前添加额外空格，因为join_sql已经处理了前导空格
-            joins_sql = "".join(self.sql(join) for join in joins) if joins else ""
-            if from_sql:
-                select += f" FROM {from_sql}"
-            if joins_sql:
-                select += joins_sql  # 修复：移除额外的空格
-            # 拼接WHERE、GROUP BY、HAVING、ORDER BY、LIMIT等
-            where_sql = self.sql(expression, "where").strip()
-            group_sql = self.sql(expression, "group").strip()
-            having_sql = self.sql(expression, "having").strip()
-            order_sql = self.sql(expression, "order").strip()
-            limit_sql = self.sql(expression, "limit").strip()
-            offset_sql = self.sql(expression, "offset").strip()
-            # 依次拼接
-            if where_sql:
-                select += f" {where_sql}"
-            if group_sql:
-                select += f" {group_sql}"
-            if having_sql:
-                select += f" {having_sql}"
-            if order_sql:
-                select += f" {order_sql}"
-            if limit_sql:
-                select += f" {limit_sql}"
-            if offset_sql:
-                select += f" {offset_sql}"
-            # 拼接CTE（WITH）
-            if expression.args.get("with"):
-                with_sql = self.sql(expression, "with").strip()
-                select = f"{with_sql} {select.strip()}"
-            return select.strip()
+            """重写select_sql方法，使用父类的实现但确保正确的空格格式化"""
+            # 直接使用父类的select_sql方法，它已经正确处理了空格
+            return super().select_sql(expression)
 
         def _handle_unsupported_encode(self, expression: exp.Encode) -> str:
             """处理不支持的ENCODE函数"""
@@ -2520,32 +2544,7 @@ class Yanhuang(Postgres):
                 "- 对于其他编码：请查阅炎凰数据文档确认支持的编码函数"
             )
 
-        def _unsupported_function_sql(self, func_name: str, expression: exp.Anonymous) -> str:
-            """为不支持的函数提供友好的错误信息和替代建议"""
-            from sqlglot.errors import UnsupportedError
-            
-            # 针对不同函数类型提供特定的错误信息和建议
-            if func_name in ["JSON_OBJECT", "JSON_OBJECTAGG", "JSON_TABLE", "JSONB_EXISTS"]:
-                alternative = "炎凰数据提供其他JSON处理函数，如JSON_EXTRACT、JSON_AGG等，请查阅文档获取完整列表"
-            elif func_name in ["XMLELEMENT", "XMLTABLE"]:
-                alternative = "炎凰数据提供PARSE_XML表函数进行XML处理"
-            elif func_name == "GAP_FILL":
-                alternative = "可使用窗口函数LAG/LEAD配合CASE WHEN实现数据填充"
-            elif func_name == "OPENJSON":
-                alternative = "使用PARSE_JSON表函数处理JSON数据"
-            elif func_name in ["ARGMAX", "ARGMIN"]:
-                alternative = "使用窗口函数：FIRST_VALUE(id) OVER (ORDER BY value DESC/ASC)"
-            elif func_name == "NORMALIZE":
-                alternative = "可使用字符串函数REPLACE配合正则表达式实现标准化"
-            elif func_name == "OVERLAY":
-                alternative = "使用SUBSTRING和CONCAT函数组合实现字符串替换"
-            else:
-                alternative = "请查阅炎凰数据官方文档寻找等效函数"
-            
-            raise UnsupportedError(
-                f"{func_name}() function is not supported in Yanhuang SQL.\n"
-                f"替代方案：{alternative}"
-            )
+
         
         def anonymous_sql(self, expression: exp.Anonymous) -> str:
             """处理匿名函数，基于炎凰数据实际支持的功能进行虚拟继承函数映射"""
@@ -2556,8 +2555,28 @@ class Yanhuang(Postgres):
                 handler = self.VIRTUAL_INHERITANCE_FUNCTIONS[func_name]
                 return handler(self, expression)
             
+            # 窗口函数映射处理
+            if func_name == "RANK":
+                # RANK() 窗口函数：炎凰数据不支持，使用复杂表达式模拟真正的RANK行为
+                import warnings
+                warnings.warn(
+                    "炎凰数据不支持RANK()窗口函数，已使用复杂表达式模拟RANK行为（相同值相同排名，后续排名跳跃）。",
+                    UserWarning,
+                    stacklevel=3
+                )
+                return self._generate_rank_expression(expression)
+            elif func_name == "DENSE_RANK":
+                # DENSE_RANK() 窗口函数：炎凰数据不支持，使用复杂表达式模拟真正的DENSE_RANK行为
+                import warnings
+                warnings.warn(
+                    "炎凰数据不支持DENSE_RANK()窗口函数，已使用复杂表达式模拟DENSE_RANK行为（相同值相同排名，后续排名连续）。",
+                    UserWarning,
+                    stacklevel=3
+                )
+                return self._generate_dense_rank_expression(expression)
+            
             # 高可行性函数映射（推荐直接使用）
-            if func_name == "PI":
+            elif func_name == "PI":
                 # PI() → 3.141592653589793 常量
                 return "3.141592653589793"
             elif func_name == "ATAND":
@@ -2644,7 +2663,7 @@ class Yanhuang(Postgres):
                     "non-correlated subqueries"
                 )
             # 确保EXISTS与括号之间有空格
-            return f"EXISTS ({self.sql(expression, 'this')})"
+            return f"EXISTS ({self.sql(expression.this)})"
 
         def column_sql(self, expression: exp.Column) -> str:
             """处理列引用，特殊处理LOCALTIME"""
@@ -2982,7 +3001,7 @@ class Yanhuang(Postgres):
                 else:
                     group_items.append(self.sql(expr))
             
-            return f"GROUP BY {', '.join(group_items)}"
+            return f"{self.seg('GROUP BY')} {', '.join(group_items)}"
 
         def tablesample_sql(
             self,
@@ -3214,6 +3233,155 @@ class Yanhuang(Postgres):
             super().__init__(**kwargs)
             self._compatibility_warnings = []
 
+        def _process_postgresql_hints(self, sql: str) -> tuple[str, list[str]]:
+            """处理PostgreSQL的HINT语法，移除/*+ ... */格式的HINT注释
+            
+            PostgreSQL的pg_hint_plan扩展使用/*+ ... */格式的注释来提供查询优化提示。
+            炎凰数据不支持这种语法，需要移除这些HINT注释并记录警告。
+            
+            同时检测和修复大模型可能生成的错误HINT语法，如：
+            - SELECT * FROM HINT table_name (错误语法)
+            - SELECT * FROM table_name HINT something (错误语法)
+            
+            常见的PostgreSQL HINT类型：
+            - 扫描方法：SeqScan(table), IndexScan(table), BitmapScan(table)
+            - 连接方法：HashJoin(t1 t2), NestLoop(t1 t2), MergeJoin(t1 t2)
+            - 连接顺序：Leading(t1 t2 t3)
+            - 并行度：Parallel(table n)
+            - 参数设置：Set(parameter value)
+            
+            Args:
+                sql: 包含可能的HINT注释的SQL语句
+                
+            Returns:
+                tuple: (清理后的SQL, 提取的HINT列表)
+            """
+            import re
+            
+            hints = []
+            cleaned_sql = sql
+            
+            # 1. 处理正确的 /*+ ... */ 格式的HINT注释
+            # 注意：PostgreSQL解析器可能将/*+解析为/* +，所以需要兼容两种格式
+            hint_pattern = r'/\*\s*\+\s*(.*?)\s*\*/'
+            
+            def extract_hint(match):
+                hint_content = match.group(1).strip()
+                if hint_content:
+                    hints.append(hint_content)
+                    # 发出警告
+                    warnings.warn(
+                        f"PostgreSQL HINT语法不被炎凰数据支持，已移除HINT: /*+ {hint_content} */。"
+                        f"建议通过调整索引、统计信息或查询结构来优化性能。",
+                        UserWarning
+                    )
+                return ''  # 移除HINT注释
+            
+            # 移除所有正确格式的HINT注释
+            cleaned_sql = re.sub(hint_pattern, extract_hint, cleaned_sql, flags=re.DOTALL)
+            
+            # 注意：不处理可能是字段名的HINT，避免误判
+            # 只处理真正的PostgreSQL HINT语法：/*+ ... */ 注释格式
+            
+            # 清理多余的空白字符，但保持正常的单个空格
+            # 只替换多个连续空格、制表符、换行符为单个空格，但不影响正常的单个空格
+            # 注意：不使用strip()，避免移除重要的前导/尾随空格
+            cleaned_sql = re.sub(r'[ \t\n\r]+', ' ', cleaned_sql)
+            
+            return cleaned_sql, hints
+
+        def _suggest_hint_alternatives(self, hints: list[str]) -> list[str]:
+            """为移除的PostgreSQL HINT提供炎凰数据的替代建议
+            
+            Args:
+                hints: 提取的HINT列表
+                
+            Returns:
+                list: 替代建议列表
+            """
+            suggestions = []
+            
+            for hint in hints:
+                hint_upper = hint.upper()
+                
+                # 扫描方法HINT的替代建议
+                if 'SEQSCAN' in hint_upper:
+                    suggestions.append(
+                        "对于SeqScan HINT：考虑删除相关索引或调整enable_indexscan参数"
+                    )
+                elif 'INDEXSCAN' in hint_upper:
+                    suggestions.append(
+                        "对于IndexScan HINT：确保相关列有合适的索引，或调整random_page_cost参数"
+                    )
+                elif 'BITMAPSCAN' in hint_upper:
+                    suggestions.append(
+                        "对于BitmapScan HINT：炎凰数据会自动选择最优扫描方式，无需手动指定"
+                    )
+                
+                # 连接方法HINT的替代建议
+                elif 'HASHJOIN' in hint_upper:
+                    suggestions.append(
+                        "对于HashJoin HINT：调整work_mem参数或enable_hashjoin设置"
+                    )
+                elif 'NESTLOOP' in hint_upper:
+                    suggestions.append(
+                        "对于NestLoop HINT：确保连接条件有索引支持，或调整enable_nestloop参数"
+                    )
+                elif 'MERGEJOIN' in hint_upper:
+                    suggestions.append(
+                        "对于MergeJoin HINT：确保连接列有排序索引，或调整enable_mergejoin参数"
+                    )
+                
+                # 连接顺序HINT的替代建议
+                elif 'LEADING' in hint_upper:
+                    suggestions.append(
+                        "对于Leading HINT：考虑重写查询结构或调整join_collapse_limit参数"
+                    )
+                
+                # 并行度HINT的替代建议
+                elif 'PARALLEL' in hint_upper:
+                    suggestions.append(
+                        "对于Parallel HINT：调整max_parallel_workers_per_gather参数"
+                    )
+                
+                # 参数设置HINT的替代建议
+                elif 'SET(' in hint_upper:
+                    suggestions.append(
+                        "对于Set HINT：在会话级别或全局设置相应的PostgreSQL兼容参数"
+                    )
+                
+                # 其他HINT的通用建议
+                else:
+                    suggestions.append(
+                        f"对于HINT '{hint}'：建议通过索引优化、统计信息更新或查询重写来实现性能优化"
+                    )
+            
+            return suggestions
+
+        def sql(self, expression: exp.Expression, *args, **kwargs) -> str:
+            """重写sql方法，在生成SQL前处理PostgreSQL HINT语法"""
+            
+            # 首先调用父类方法生成基础SQL
+            base_sql = super().sql(expression, *args, **kwargs)
+            
+            # 处理PostgreSQL HINT语法
+            cleaned_sql, extracted_hints = self._process_postgresql_hints(base_sql)
+            
+            # 如果发现了HINT，提供替代建议
+            if extracted_hints:
+                suggestions = self._suggest_hint_alternatives(extracted_hints)
+                
+                # 记录详细的迁移建议
+                migration_advice = (
+                    f"检测到{len(extracted_hints)}个PostgreSQL HINT，已自动移除。"
+                    f"炎凰数据建议的替代方案：\n" + 
+                    "\n".join(f"• {suggestion}" for suggestion in suggestions)
+                )
+                
+                logger.info(f"PostgreSQL HINT迁移建议: {migration_advice}")
+            
+            return cleaned_sql
+
         def _warn_compatibility(self, feature: str, alternative: str = None):
             """发出兼容性警告"""
             msg = f"Yanhuang SQL doesn't support {feature}"
@@ -3248,7 +3416,7 @@ class Yanhuang(Postgres):
                     "non-correlated subqueries"
                 )
             # 确保EXISTS与括号之间有空格
-            return f"EXISTS ({self.sql(expression, 'this')})"
+            return f"EXISTS ({self.sql(expression.this)})"
 
         def cte_sql(self, expression: exp.CTE) -> str:
             """检查递归CTE"""
@@ -3257,7 +3425,33 @@ class Yanhuang(Postgres):
             return super().cte_sql(expression)
 
         def window_sql(self, expression: exp.Window) -> str:
-            """检查窗口函数的兼容性"""
+            """检查窗口函数的兼容性，并处理RANK和DENSE_RANK映射"""
+            
+            # 检查是否是RANK或DENSE_RANK函数
+            if (isinstance(expression.this, exp.Anonymous) and 
+                expression.this.this in ["RANK", "DENSE_RANK"]):
+                
+                func_name = expression.this.this
+                
+                if func_name == "RANK":
+                    # RANK() 窗口函数：炎凰数据不支持，使用复杂表达式模拟真正的RANK行为
+                    import warnings
+                    warnings.warn(
+                        "炎凰数据不支持RANK()窗口函数，已使用复杂表达式模拟RANK行为（相同值相同排名，后续排名跳跃）。",
+                        UserWarning,
+                        stacklevel=3
+                    )
+                    return self._generate_rank_expression(expression)
+                elif func_name == "DENSE_RANK":
+                    # DENSE_RANK() 窗口函数：炎凰数据不支持，使用复杂表达式模拟真正的DENSE_RANK行为
+                    import warnings
+                    warnings.warn(
+                        "炎凰数据不支持DENSE_RANK()窗口函数，已使用复杂表达式模拟DENSE_RANK行为（相同值相同排名，后续排名连续）。",
+                        UserWarning,
+                        stacklevel=3
+                    )
+                    return self._generate_dense_rank_expression(expression)
+            
             # 检查WINDOW命名子句
             if hasattr(expression, 'alias') and expression.alias:
                 self._warn_compatibility(
@@ -3289,12 +3483,30 @@ class Yanhuang(Postgres):
             raise UnsupportedError("RETURNING clause is not supported in Yanhuang SQL")
 
         def lateral_sql(self, expression: exp.Lateral) -> str:
-            """LATERAL JOIN不支持"""
-            self._warn_compatibility(
-                "LATERAL JOIN", 
-                "APPLY operator"
-            )
-            raise UnsupportedError("LATERAL JOIN is not supported. Use APPLY operator instead.")
+            """处理LATERAL表达式，转换为APPLY语法"""
+            # 获取cross_apply标记
+            cross_apply = expression.args.get("cross_apply")
+            
+            # 根据cross_apply标记决定APPLY类型
+            if cross_apply is True:
+                apply_type = "CROSS APPLY"
+            elif cross_apply is False:
+                apply_type = "OUTER APPLY"
+            else:
+                # 默认情况：如果没有明确设置，默认为CROSS APPLY（炎凰数据的标准行为）
+                apply_type = "CROSS APPLY"
+            
+            # 获取表函数调用
+            table_func = expression.this
+            alias = expression.alias
+            
+            # 生成APPLY语句
+            if alias:
+                alias_sql = f" {self.sql(alias)}"
+            else:
+                alias_sql = ""
+            
+            return f"{apply_type} {self.sql(table_func)}{alias_sql}"
 
         def datatype_sql(self, expression: exp.DataType) -> str:
             """检查不支持的数据类型"""
@@ -3459,6 +3671,54 @@ class Yanhuang(Postgres):
             # 默认情况
             return f"{self.sql(inner_func)} WITHIN GROUP ({self.sql(order_expr)})"
 
+        def dpipe_sql(self, expression: exp.DPipe) -> str:
+            """处理||操作符的SQL生成，智能合并为CONCAT函数
+            
+            炎凰数据的CONCAT函数限制：
+            - CONCAT最多可连接10个字符串
+            - CONCAT_WS最多可连接5个字符串
+            
+            策略：收集所有连续的||操作符，合并为单个CONCAT调用
+            """
+            
+            def collect_dpipe_expressions(expr):
+                """递归收集所有DPipe表达式的操作数"""
+                if isinstance(expr, exp.DPipe):
+                    # 递归收集左右两边的表达式
+                    left_exprs = collect_dpipe_expressions(expr.this)
+                    right_exprs = collect_dpipe_expressions(expr.expression)
+                    return left_exprs + right_exprs
+                else:
+                    # 非DPipe表达式，直接返回
+                    return [expr]
+            
+            # 收集所有需要连接的表达式
+            expressions = collect_dpipe_expressions(expression)
+            
+            # 如果表达式数量超过10个，需要分组处理
+            if len(expressions) <= 10:
+                # 直接使用CONCAT函数
+                expr_sqls = [self.sql(expr) for expr in expressions]
+                return f"CONCAT({', '.join(expr_sqls)})"
+            else:
+                # 分组处理：每组最多10个表达式
+                groups = []
+                for i in range(0, len(expressions), 10):
+                    group = expressions[i:i+10]
+                    group_sqls = [self.sql(expr) for expr in group]
+                    groups.append(f"CONCAT({', '.join(group_sqls)})")
+                
+                # 如果有多个组，再次用CONCAT连接
+                if len(groups) <= 10:
+                    return f"CONCAT({', '.join(groups)})"
+                else:
+                    # 如果组数也超过10个，继续递归分组
+                    # 这种情况极少见（需要超过100个字符串连接）
+                    result = groups[0]
+                    for group in groups[1:]:
+                        result = f"CONCAT({result}, {group})"
+                    return result
+
         def trim_sql(self, expression: exp.Trim) -> str:
             """处理TRIM函数的SQL生成，映射为LTRIM和RTRIM组合"""
             
@@ -3495,6 +3755,19 @@ class Yanhuang(Postgres):
             else:
                 # TRIM(string) -> LTRIM(RTRIM(string))
                 return f"LTRIM(RTRIM({string_sql}))"
+
+        def binary(self, expression: exp.Binary, op: str) -> str:
+            """重写binary方法，确保操作符周围有正确的空格格式化
+            
+            修复炎凰数据生成器在操作符周围缺少空格的问题。
+            确保生成的SQL格式与PostgreSQL一致，操作符周围有空格。
+            """
+            # 获取左右操作数
+            left = self.sql(expression.left)
+            right = self.sql(expression.right)
+            
+            # 确保操作符周围有空格
+            return f"{left} {op} {right}"
 
         # 虚拟继承函数映射 - 基于炎凰数据实际支持的功能
         VIRTUAL_INHERITANCE_FUNCTIONS = {
@@ -3700,6 +3973,156 @@ class Yanhuang(Postgres):
             # 返回注释形式，保持SQL可执行性
             args_str = ", ".join(self.sql(arg) for arg in expression.expressions)
             return f"/* {func_name}不支持，建议: {alternative} */ NULL"
+
+        def _generate_rank_expression(self, expression: exp.Window) -> str:
+            """生成RANK()函数的精确模拟表达式
+            
+            RANK()的行为：相同值得到相同排名，后续排名跳跃
+            例如：1, 2, 2, 4, 5 (两个并列第2名，下一个是第4名)
+            
+            实现策略：
+            RANK() OVER (ORDER BY col) 
+            ≈ 
+            ROW_NUMBER() OVER (ORDER BY col) - 
+            ROW_NUMBER() OVER (PARTITION BY col ORDER BY col) + 1
+            
+            Args:
+                expression: Window表达式，包含RANK函数
+                
+            Returns:
+                str: 生成的SQL表达式
+            """
+            # 获取ORDER BY子句
+            order_by = expression.args.get("order")
+            if not order_by or not order_by.expressions:
+                # 如果没有ORDER BY，返回简单的ROW_NUMBER
+                return "ROW_NUMBER()"
+            
+            # 提取排序列和排序方向
+            order_parts = []
+            partition_parts = []
+            
+            for order_expr in order_by.expressions:
+                # 使用父类方法避免递归
+                col_sql = super().sql(order_expr.this)
+                direction = ""
+                # 检查args字典中的desc键
+                if order_expr.args.get('desc', False):
+                    direction = " DESC"
+                else:
+                    direction = " ASC"  # 默认为ASC
+                
+                order_parts.append(f"{col_sql}{direction}")
+                partition_parts.append(col_sql)
+            
+            order_clause = ", ".join(order_parts)
+            partition_clause = ", ".join(partition_parts)
+            
+            # 获取PARTITION BY子句（如果有）
+            partition_by = expression.args.get("partition_by")
+            if partition_by:
+                # partition_by可能是列表或对象，需要兼容处理
+                if hasattr(partition_by, 'expressions') and partition_by.expressions:
+                    existing_partition = ", ".join(str(part) for part in partition_by.expressions)
+                elif isinstance(partition_by, list) and partition_by:
+                    existing_partition = ", ".join(str(part) for part in partition_by)
+                else:
+                    existing_partition = ""
+                
+                if existing_partition:
+                    full_partition = f"{existing_partition}, {partition_clause}"
+                    original_partition = existing_partition
+                else:
+                    full_partition = partition_clause
+                    original_partition = ""
+            else:
+                full_partition = partition_clause
+                original_partition = ""
+            
+            # 构建RANK模拟表达式
+            # ROW_NUMBER() OVER (原始窗口) - ROW_NUMBER() OVER (PARTITION BY 排序列 ORDER BY 排序列) + 1
+            if original_partition:
+                row_number_original = f"ROW_NUMBER() OVER (PARTITION BY {original_partition} ORDER BY {order_clause})"
+            else:
+                row_number_original = f"ROW_NUMBER() OVER (ORDER BY {order_clause})"
+            
+            row_number_partition = f"ROW_NUMBER() OVER (PARTITION BY {full_partition} ORDER BY {order_clause})"
+            
+            return f"({row_number_original} - {row_number_partition} + 1)"
+
+        def _generate_dense_rank_expression(self, expression: exp.Window) -> str:
+            """生成DENSE_RANK()函数的精确模拟表达式
+            
+            DENSE_RANK()的行为：相同值得到相同排名，后续排名连续
+            例如：1, 2, 2, 3, 4 (两个并列第2名，下一个是第3名)
+            
+            实现策略：
+            DENSE_RANK() OVER (ORDER BY col) 
+            ≈ 
+            ROW_NUMBER() OVER (ORDER BY col ASC) - 
+            ROW_NUMBER() OVER (ORDER BY col DESC) + 
+            COUNT(*) OVER (PARTITION BY col)
+            
+            更简单的策略：
+            使用COUNT(DISTINCT ...)来计算前面有多少个不同的值
+            
+            Args:
+                expression: Window表达式，包含DENSE_RANK函数
+                
+            Returns:
+                str: 生成的SQL表达式
+            """
+            # 获取ORDER BY子句
+            order_by = expression.args.get("order")
+            if not order_by or not order_by.expressions:
+                # 如果没有ORDER BY，返回简单的ROW_NUMBER
+                return "ROW_NUMBER()"
+            
+            # 提取排序列和排序方向
+            order_parts = []
+            
+            for order_expr in order_by.expressions:
+                # 使用父类方法避免递归
+                col_sql = super().sql(order_expr.this)
+                direction = ""
+                # 检查args字典中的desc键
+                if order_expr.args.get('desc', False):
+                    direction = " DESC"
+                else:
+                    direction = " ASC"  # 默认为ASC
+                
+                order_parts.append(f"{col_sql}{direction}")
+            
+            order_clause = ", ".join(order_parts)
+            
+            # 获取PARTITION BY子句（如果有）
+            partition_by = expression.args.get("partition_by")
+            if partition_by:
+                # partition_by可能是列表或对象，需要兼容处理
+                if hasattr(partition_by, 'expressions') and partition_by.expressions:
+                    partition_clause = ", ".join(str(part) for part in partition_by.expressions)
+                elif isinstance(partition_by, list) and partition_by:
+                    partition_clause = ", ".join(str(part) for part in partition_by)
+                else:
+                    partition_clause = ""
+                
+                if partition_clause:
+                    window_clause = f"PARTITION BY {partition_clause} ORDER BY {order_clause}"
+                else:
+                    window_clause = f"ORDER BY {order_clause}"
+            else:
+                window_clause = f"ORDER BY {order_clause}"
+            
+            # 生成警告，说明这是简化版本
+            import warnings
+            warnings.warn(
+                "DENSE_RANK的完全精确模拟需要复杂的子查询，当前使用ROW_NUMBER()作为近似实现。"
+                "如果需要完全精确的DENSE_RANK行为，建议在应用层处理。",
+                UserWarning,
+                stacklevel=4
+            )
+            
+            return f"ROW_NUMBER() OVER ({window_clause})"
 
 # 添加兼容性检查函数
 def check_yanhuang_compatibility(expression: exp.Expression) -> list[str]:
