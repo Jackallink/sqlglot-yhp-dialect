@@ -1,0 +1,62 @@
+[build-system]
+requires = ["setuptools>=45", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sqlglot-yanhuang-dialect"
+dynamic = ["version"]
+authors = [
+    {name = "炎凰数据团队", email = "support@yanhuangdata.com"},
+]
+description = "炎凰数据 SQL 方言包 - SQLGlot 扩展"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.8"
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Developers",
+    "Topic :: Database",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+keywords = ["sql", "database", "yanhuang", "transpile", "dialect", "sqlglot"]
+dependencies = [
+    "sqlglot>=23.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-cov>=4.0.0",
+]
+test = [
+    "pytest>=7.0.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/yanhuangdata/sqlglot-yanhuang-dialect"
+Documentation = "https://docs.yanhuangdata.com/sqlglot-dialect"
+Repository = "https://github.com/yanhuangdata/sqlglot-yanhuang-dialect"
+Issues = "https://github.com/yanhuangdata/sqlglot-yanhuang-dialect/issues"
+
+[project.scripts]
+yanhuang-transpile = "sqlglot_yanhuang.cli:main"
+
+[tool.setuptools.dynamic]
+version = {attr = "sqlglot_yanhuang.__version__"}
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["sqlglot_yanhuang*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]

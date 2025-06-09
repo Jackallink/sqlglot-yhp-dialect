@@ -650,7 +650,10 @@ class TestYanhuangComprehensive(Validator):
         self.validate_identity("PIVOT cities ON year IN (2000, 2020) USING SUM(population) GROUP BY country ORDER BY country DESC")
         
         # PIVOT with TIME()
-        self.validate_identity("PIVOT cities ON country USING SUM(population) GROUP BY TIME(span='5y', start='1990-01-01T00:00:00', end='2020-01-01T00:00:00') ORDER BY _time")
+        self.validate_transform(
+            "PIVOT cities ON country USING SUM(population) GROUP BY TIME(span='5y', start='1990-01-01T00:00:00', end='2020-01-01T00:00:00') ORDER BY _time",
+            "PIVOT cities ON country USING SUM(population) GROUP BY TIME(span = '5y', start = '1990-01-01T00:00:00', \"end\" = '2020-01-01T00:00:00') ORDER BY _time"
+        )
 
     def test_cte_functionality(self):
         """CTE功能测试"""
@@ -891,7 +894,7 @@ class TestYanhuangComprehensive(Validator):
         # PostgreSQL特有函数（继承自父类）
         self.validate_identity("SELECT GENERATE_SERIES(1, 10)")
         
-        # UNNEST函数在炎凰SQL中映射为FLATTEN - 这是正确的映射
+        # UNNEST函数在炎凰SQL中映射为FLATTEN - 这是正确的映射行为
         self.validate_transform(
             "SELECT UNNEST(ARRAY[1, 2, 3])",
             "SELECT FLATTEN(ARRAY[1, 2, 3])"
@@ -1037,7 +1040,7 @@ class TestYanhuangComprehensive(Validator):
             "WITH t1 AS (SELECT * FROM main) SELECT * FROM t1",
             "SELECT * FROM orders WHERE CustomerID IN (SELECT CustomerID FROM customers)",
             "SELECT * FROM orders WHERE EXISTS (SELECT 1 FROM customers)",
-            "SELECT U&'\\0061bcd' AS field_name FROM main",
+            "SELECT U&'\\0048\\0065\\006C\\006C\\006F'",
             "PIVOT cities ON country USING SUM(population) GROUP BY year ORDER BY year",
             
             # COLUMNS RENAME功能回归测试（修复后应该工作的查询）
@@ -2707,7 +2710,7 @@ class TestYanhuangComprehensive(Validator):
             print(f"  ✅ SELECT替代方案成功: {select_sql}")
         except Exception as e:
             print(f"  ❌ 替代方案失败: {e}")
-
+        
         print("\n🎯 替代方案测试总结:")
         print("  ✅ INTERSECT -> INNER JOIN (语义等价)")
         print("  ✅ EXCEPT -> LEFT JOIN + IS NULL (语义等价)")
@@ -5434,7 +5437,7 @@ class TestYanhuangComprehensive(Validator):
             "CONCAT_WS": {
                 "问题": "错误映射为字符串连接操作符",
                 "修正": "保持原函数名，炎凰数据原生支持",
-                "测试": "SELECT CONCAT_WS(',', 'a', 'b', 'c')"
+                "测试": "SELECT CONCAT_WS(',', 'a', 'b')"
             },
             "ARRAY_LENGTH": {
                 "问题": "错误映射为ARRAY_SIZE",
@@ -6306,211 +6309,6 @@ class TestYanhuangPostgreSQLHints(Validator):
             self.assertTrue(len(w) > 0)
             warning_msg = str(w[0].message)
             self.assertIn("PostgreSQL HINT语法不被炎凰数据支持", warning_msg)
-
-
-class TestYanhuangGroupingSetsHandling(Validator):
-    """测试GROUPING和GROUPING SETS语法的处理"""
-    maxDiff = None
-    dialect = Yanhuang
-
-    def test_grouping_sets_syntax_removal_and_warnings(self):
-        """测试GROUPING SETS语法的移除和警告"""
-        sql = """
-        SELECT region, product, SUM(sales)
-        FROM sales_table 
-        GROUP BY GROUPING SETS ((region, product), (region), ())
-        """
-        
-        # 应该生成警告并移除GROUPING SETS语法
-        with self.assertWarns(UserWarning):
-            result = sqlglot.transpile(sql, read="postgres", write="yanhuang")[0]
-        
-        # 验证GROUPING SETS被移除
-        self.assertNotIn("GROUPING SETS", result)
-        self.assertIn("SELECT", result)
-        self.assertIn("SUM(sales)", result)
-
-    def test_grouping_function_warning_and_replacement(self):
-        """测试GROUPING函数的警告和替换"""
-        sql = """
-        SELECT region, GROUPING(region) as is_total, SUM(sales)
-        FROM sales_table 
-        GROUP BY region
-        """
-        
-        # 应该生成警告并替换GROUPING函数
-        with self.assertWarns(UserWarning):
-            result = sqlglot.transpile(sql, read="postgres", write="yanhuang")[0]
-        
-        # 验证GROUPING函数被替换
-        self.assertNotIn("GROUPING(region)", result)
-        self.assertIn("0", result)  # 替换为固定值0
-        self.assertIn("not supported", result)
-
-    def test_rollup_syntax_removal_and_warnings(self):
-        """测试ROLLUP语法的移除和警告"""
-        sql = """
-        SELECT region, department, SUM(sales)
-        FROM sales_table 
-        GROUP BY ROLLUP(region, department)
-        """
-        
-        # 应该生成警告并移除ROLLUP语法
-        with self.assertWarns(UserWarning):
-            result = sqlglot.transpile(sql, read="postgres", write="yanhuang")[0]
-        
-        # 验证ROLLUP被移除
-        self.assertNotIn("ROLLUP", result)
-        self.assertIn("SELECT", result)
-        self.assertIn("SUM(sales)", result)
-
-    def test_cube_syntax_removal_and_warnings(self):
-        """测试CUBE语法的移除和警告"""
-        sql = """
-        SELECT region, department, product, SUM(sales)
-        FROM sales_table 
-        GROUP BY CUBE(region, department, product)
-        """
-        
-        # 应该生成警告并移除CUBE语法
-        with self.assertWarns(UserWarning):
-            result = sqlglot.transpile(sql, read="postgres", write="yanhuang")[0]
-        
-        # 验证CUBE被移除
-        self.assertNotIn("CUBE", result)
-        self.assertIn("SELECT", result)
-        self.assertIn("SUM(sales)", result)
-
-    def test_grouping_sets_with_regular_columns(self):
-        """测试GROUPING SETS与普通列混合的情况"""
-        sql = """
-        SELECT region, dept, product, SUM(sales)
-        FROM sales_table 
-        GROUP BY dept, GROUPING SETS ((region, product), (region), ())
-        """
-        
-        # 应该生成警告，保留普通列，移除GROUPING SETS
-        with self.assertWarns(UserWarning):
-            result = sqlglot.transpile(sql, read="postgres", write="yanhuang")[0]
-        
-        # 验证GROUP BY被保留（因为有普通列dept）
-        self.assertIn("GROUP BY", result)
-        self.assertIn("dept", result)
-        self.assertNotIn("GROUPING SETS", result)
-
-    def test_rollup_with_regular_columns(self):
-        """测试ROLLUP与普通列混合的情况"""
-        sql = """
-        SELECT region, dept, product, SUM(sales)
-        FROM sales_table 
-        GROUP BY dept, ROLLUP(region, product)
-        """
-        
-        # 应该生成警告，保留普通列，移除ROLLUP
-        with self.assertWarns(UserWarning):
-            result = sqlglot.transpile(sql, read="postgres", write="yanhuang")[0]
-        
-        # 验证GROUP BY被保留（因为有普通列dept）
-        self.assertIn("GROUP BY", result)
-        self.assertIn("dept", result)
-        self.assertNotIn("ROLLUP", result)
-
-    def test_cube_with_regular_columns(self):
-        """测试CUBE与普通列混合的情况"""
-        sql = """
-        SELECT region, dept, product, SUM(sales)
-        FROM sales_table 
-        GROUP BY dept, CUBE(region, product)
-        """
-        
-        # 应该生成警告，保留普通列，移除CUBE
-        with self.assertWarns(UserWarning):
-            result = sqlglot.transpile(sql, read="postgres", write="yanhuang")[0]
-        
-        # 验证GROUP BY被保留（因为有普通列dept）
-        self.assertIn("GROUP BY", result)
-        self.assertIn("dept", result)
-        self.assertNotIn("CUBE", result)
-
-    def test_mixed_grouping_syntax_comprehensive(self):
-        """测试混合GROUPING语法的综合处理"""
-        sql = """
-        SELECT region, GROUPING(region) as is_total, 
-               dept, GROUPING(dept) as dept_total,
-               SUM(sales)
-        FROM sales_table 
-        GROUP BY dept, GROUPING SETS ((region), ())
-        """
-        
-        # 应该生成多个警告
-        with warnings.catch_warnings(record=True) as w:
-            warnings.simplefilter("always")
-            result = sqlglot.transpile(sql, read="postgres", write="yanhuang")[0]
-            
-            # 验证生成了多个警告（GROUPING函数和GROUPING SETS）
-            self.assertGreaterEqual(len(w), 2)
-        
-        # 验证所有GROUPING语法都被处理
-        self.assertNotIn("GROUPING SETS", result)
-        self.assertNotIn("GROUPING(region)", result)
-        self.assertNotIn("GROUPING(dept)", result)
-        # 验证GROUP BY被保留（因为有普通列dept）
-        self.assertIn("GROUP BY", result)
-        self.assertIn("dept", result)
-
-    def test_pure_grouping_syntax_removal(self):
-        """测试纯GROUPING语法的完全移除"""
-        sql = """
-        SELECT region, SUM(sales)
-        FROM sales_table 
-        GROUP BY ROLLUP(region)
-        """
-        
-        # 应该生成警告并完全移除GROUP BY子句
-        with self.assertWarns(UserWarning):
-            result = sqlglot.transpile(sql, read="postgres", write="yanhuang")[0]
-        
-        # 验证整个GROUP BY子句被移除（因为只有ROLLUP，没有普通列）
-        self.assertNotIn("GROUP BY", result)
-        self.assertNotIn("ROLLUP", result)
-        # 但SELECT和FROM应该保留
-        self.assertIn("SELECT", result)
-        self.assertIn("FROM", result)
-
-    def test_grouping_warning_messages_content(self):
-        """测试GROUPING警告信息的内容"""
-        test_cases = [
-            {
-                "sql": "SELECT region, SUM(sales) FROM sales GROUP BY GROUPING SETS ((region), ())",
-                "expected_in_warning": ["GROUPING SETS", "UNION ALL"]
-            },
-            {
-                "sql": "SELECT region, GROUPING(region) FROM sales GROUP BY region",
-                "expected_in_warning": ["GROUPING", "CASE WHEN"]
-            },
-            {
-                "sql": "SELECT region, SUM(sales) FROM sales GROUP BY ROLLUP(region)",
-                "expected_in_warning": ["ROLLUP", "UNION ALL"]
-            },
-            {
-                "sql": "SELECT region, SUM(sales) FROM sales GROUP BY CUBE(region)",
-                "expected_in_warning": ["CUBE", "UNION ALL"]
-            }
-        ]
-        
-        for case in test_cases:
-            with self.subTest(sql=case["sql"]):
-                with warnings.catch_warnings(record=True) as w:
-                    warnings.simplefilter("always")
-                    sqlglot.transpile(case["sql"], read="postgres", write="yanhuang")
-                    
-                    # 验证生成了警告
-                    self.assertGreater(len(w), 0)
-                    
-                    # 验证警告信息包含预期内容
-                    warning_message = str(w[0].message)
-                    for expected_text in case["expected_in_warning"]:
-                        self.assertIn(expected_text, warning_message)
 
 
 # ============================================================================

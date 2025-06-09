@@ -736,47 +736,6 @@ def _unsupported_function_warning(func_name: str, func_type: str, args: t.List) 
     return exp.Anonymous(this=func_name, expressions=args)
 
 
-def _grouping_function_warning(args: t.List) -> exp.Anonymous:
-    """GROUPING函数不支持，提供警告和替代建议"""
-    import warnings
-    column_name = args[0] if args else "unknown"
-    column_sql = str(column_name) if hasattr(column_name, 'sql') else str(column_name)
-    
-    warnings.warn(
-        f"炎凰数据不支持GROUPING函数。建议的替代方案：\n"
-        f"原SQL: GROUPING({column_sql})\n"
-        f"替代方案: 使用CASE WHEN子句手动检测汇总行，或重写查询使用UNION ALL。",
-        UserWarning
-    )
-    
-    # 返回一个固定值，表示不支持GROUPING函数
-    return exp.Anonymous(this="0", expressions=[])  # 返回0表示非汇总行
-
-
-def _rollup_warning(args: t.List) -> exp.Anonymous:
-    """ROLLUP语法不支持，提供警告和替代建议"""
-    import warnings
-    warnings.warn(
-        "炎凰数据不支持ROLLUP语法。建议使用UNION ALL将不同的GROUP BY查询合并：\n"
-        "原SQL: GROUP BY ROLLUP(a, b)\n"
-        "替代方案: GROUP BY a, b UNION ALL GROUP BY a UNION ALL SELECT ...",
-        UserWarning
-    )
-    return exp.Anonymous(this="UNSUPPORTED_ROLLUP", expressions=args)
-
-
-def _cube_warning(args: t.List) -> exp.Anonymous:
-    """CUBE语法不支持，提供警告和替代建议"""
-    import warnings
-    warnings.warn(
-        "炎凰数据不支持CUBE语法。建议使用UNION ALL将不同的GROUP BY查询合并：\n"
-        "原SQL: GROUP BY CUBE(a, b)\n"
-        "替代方案: 使用UNION ALL组合所有可能的分组维度组合",
-        UserWarning
-    )
-    return exp.Anonymous(this="UNSUPPORTED_CUBE", expressions=args)
-
-
 def _make_time_mapping(args: t.List) -> exp.Anonymous:
     """将MAKE_TIME映射为STRPTIME + CONCAT组合
     
@@ -1322,6 +1281,9 @@ class Yanhuang(Postgres):
             "ARRAY_UPPER": lambda args: _unsupported_function_warning("ARRAY_UPPER", "数组上界函数", args),
             "ARRAY_NDIMS": lambda args: _unsupported_function_warning("ARRAY_NDIMS", "数组维数函数", args),
             
+            # 28. GROUPING函数（不支持，提供告警和替代建议）
+            "GROUPING": lambda args: _grouping_function_warning(args),
+            
             # 25. 聚合函数（不支持，提供告警）
             "ARRAY_AGG": lambda args: _unsupported_function_warning("ARRAY_AGG", "数组聚合函数", args),
             "JSON_AGG": lambda args: _unsupported_function_warning("JSON_AGG", "JSON聚合函数", args),
@@ -1725,9 +1687,6 @@ class Yanhuang(Postgres):
             "INITCAP": lambda args: exp.Anonymous(this="INITCAP", expressions=args),  # 炎凰数据原生支持INITCAP
             "LPAD": lambda args: exp.Anonymous(this="LPAD", expressions=args),  # 炎凰数据原生支持LPAD
             "RPAD": lambda args: exp.Anonymous(this="RPAD", expressions=args),  # 炎凰数据原生支持RPAD
-            
-            # 28. GROUPING函数（不支持，提供告警和替代建议）
-            "GROUPING": _grouping_function_warning,
             
             # 19. 数组函数增量映射（需要映射的PostgreSQL函数）
             # 注意：炎凰数据只支持一维数组，不需要维度函数
@@ -2197,11 +2156,6 @@ class Yanhuang(Postgres):
             exp.TsOrDsAdd: lambda self, e: self.date_add_sql(e),  # 使用炎凰语法
             exp.TsOrDsDiff: lambda self, e: self.date_diff_sql(e),  # 使用炎凰语法
             exp.UnixToTime: lambda self, e: f"DATEADD(second, {self.sql(e, 'this')}, '1970-01-01')",
-            
-            # GROUPING相关表达式处理
-            exp.GroupingSets: lambda self, e: self.groupingsets_sql(e),
-            exp.Rollup: lambda self, e: self.rollup_sql(e),  
-            exp.Cube: lambda self, e: self.cube_sql(e),
             exp.Values: lambda self, e: self.values_sql(e),
             exp.Variance: rename_func("VAR_SAMP"),
             exp.VariancePop: rename_func("VAR_POP"),
@@ -2209,9 +2163,14 @@ class Yanhuang(Postgres):
             exp.WithinGroup: lambda self, e: self.withingroup_sql(e),
             exp.Show: lambda self, e: self.show_sql(e),  # 添加SHOW语句支持
             
-            # 不支持的语法 - 抛出错误
+            # 不支持的语法 - 抛出错误或提供警告
             exp.Intersect: lambda self, e: self.intersect_sql(e),  # 添加INTERSECT处理
             exp.Except: lambda self, e: self.except_sql(e),  # 添加EXCEPT处理
+            
+            # GROUPING相关语法不支持 - 提供警告和替代建议
+            exp.GroupingSets: lambda self, e: self.groupingsets_sql(e),  # 处理GROUPING SETS语法
+            exp.Rollup: lambda self, e: self.rollup_sql(e),  # 处理ROLLUP语法
+            exp.Cube: lambda self, e: self.cube_sql(e),  # 处理CUBE语法
             
             # 表函数转换
             exp.ExplodingGenerateSeries: lambda self, e: self.func("GENERATE_SERIES", e.args.get("start"), e.args.get("end"), e.args.get("step")) if e.args.get("step") else self.func("GENERATE_SERIES", e.args.get("start"), e.args.get("end")),
@@ -2263,7 +2222,7 @@ class Yanhuang(Postgres):
                 self.func("DATE_DIFF", e.expressions[1], e.expressions[0]) if e.this == "AGE" and len(e.expressions) >= 2 
                 else self.func("ARRAY_LENGTH", e.expressions[0]) if e.this == "CARDINALITY" and len(e.expressions) == 1
                 else "NOW()" if e.this in ["CLOCK_TIMESTAMP", "STATEMENT_TIMESTAMP", "TRANSACTION_TIMESTAMP", "LOCALTIMESTAMP"] and len(e.expressions) == 0
-                else self.grouping_function_sql(e) if e.this == "GROUPING"  # GROUPING函数特殊处理
+                else self.grouping_function_sql(e) if e.this == "GROUPING" and len(e.expressions) >= 1
                 # 移除ARRAY_LOWER和ARRAY_NDIMS的错误映射，这些函数应该产生告警
                 else self.anonymous_sql(e)
             ),
@@ -2599,48 +2558,6 @@ class Yanhuang(Postgres):
         def anonymous_sql(self, expression: exp.Anonymous) -> str:
             """处理匿名函数，基于炎凰数据实际支持的功能进行虚拟继承函数映射"""
             func_name = expression.this
-            
-            # 特殊处理TIME函数 - 确保参数格式正确
-            if func_name == "TIME":
-                # TIME函数的已知参数名列表（这些参数即使是关键字也不应该加引号）
-                TIME_PARAMS = {"start", "end", "column", "span", "alignment"}
-                
-                params = []
-                for param_expr in expression.expressions:
-                    if isinstance(param_expr, exp.EQ):
-                        # 处理参数名
-                        left_expr = param_expr.this
-                        param_name = None
-                        
-                        # 获取参数名的原始文本
-                        if isinstance(left_expr, exp.Column) and isinstance(left_expr.this, exp.Identifier):
-                            param_name = left_expr.this.this
-                        elif isinstance(left_expr, exp.Identifier):
-                            param_name = left_expr.this
-                        elif hasattr(left_expr, 'name'):
-                            param_name = left_expr.name
-                        else:
-                            param_name = str(left_expr)
-                        
-                        # 对于TIME函数的已知参数，强制不加引号
-                        if param_name and param_name.lower() in TIME_PARAMS:
-                            key = param_name  # 直接使用参数名，不加引号
-                        else:
-                            key = self.sql(left_expr)  # 其他情况使用标准生成
-                        
-                        value = self.sql(param_expr.expression)
-                        params.append(f"{key}={value}")
-                    elif isinstance(param_expr, exp.PropertyEQ):
-                        # 对于PropertyEQ，直接使用this的名称，不加引号
-                        if isinstance(param_expr.this, exp.Identifier):
-                            key = param_expr.this.this  # 获取标识符的原始名称
-                        else:
-                            key = self.sql(param_expr.this)
-                        value = self.sql(param_expr.expression)
-                        params.append(f"{key}={value}")
-                    else:
-                        params.append(self.sql(param_expr))
-                return f"TIME({', '.join(params)})"
             
             # 虚拟继承函数处理 - 基于炎凰数据实际支持的功能
             if hasattr(self, 'VIRTUAL_INHERITANCE_FUNCTIONS') and func_name in self.VIRTUAL_INHERITANCE_FUNCTIONS:
@@ -3043,11 +2960,7 @@ class Yanhuang(Postgres):
             return sql
 
         def group_sql(self, expression: exp.Group) -> str:
-            """完全重写GROUP BY生成，支持TIME()语法和GROUPING处理
-            
-            这个方法完全覆盖父类的group_sql实现，以确保正确处理
-            GROUPING SETS、ROLLUP、CUBE等不支持的语法。
-            """
+            """生成GROUP BY语句，支持TIME()语法和GROUPING处理"""
             
             # 首先检查是否有grouping_sets属性
             grouping_sets = expression.args.get("grouping_sets")
@@ -3060,50 +2973,96 @@ class Yanhuang(Postgres):
                         self.rollup_sql(grouping_expr)
                     elif isinstance(grouping_expr, exp.Cube):
                         self.cube_sql(grouping_expr)
+                # GROUPING SETS被移除，但保留普通的GROUP BY列
             
             # 检查是否有rollup属性
             rollup = expression.args.get("rollup")
             if rollup:
+                print(f"DEBUG: 找到ROLLUP属性: {rollup}")  # 调试
                 for rollup_expr in rollup:
                     if isinstance(rollup_expr, exp.Rollup):
+                        print(f"DEBUG: 调用rollup_sql处理: {rollup_expr}")  # 调试
                         self.rollup_sql(rollup_expr)
             
             # 检查是否有cube属性
             cube = expression.args.get("cube")
             if cube:
+                print(f"DEBUG: 找到CUBE属性: {cube}")  # 调试
                 for cube_expr in cube:
                     if isinstance(cube_expr, exp.Cube):
+                        print(f"DEBUG: 调用cube_sql处理: {cube_expr}")  # 调试
                         self.cube_sql(cube_expr)
             
-            # 处理普通表达式
+            # 处理普通的expressions列表
+            if not expression.expressions:
+                # 如果没有普通的表达式，检查是否还有其他属性需要保留GROUP BY
+                if grouping_sets or rollup or cube:
+                    # 如果处理了GROUPING语法但没有普通列，返回空字符串（移除GROUP BY）
+                    return ""
+                else:
+                    return ""
+            
             group_items = []
             for expr in expression.expressions:
-                if isinstance(expr, exp.Anonymous) and expr.this == "TIME":
-                    # 处理TIME()语法 - 保留表达式对象
-                    group_items.append(expr)
-                elif isinstance(expr, exp.Rollup):
-                    # 处理ROLLUP表达式
+                # 检查是否是ROLLUP或CUBE表达式（在expressions中）
+                if isinstance(expr, exp.Rollup):
                     self.rollup_sql(expr)
-                    # ROLLUP被移除，不添加到group_items
+                    # 不添加到group_items中，因为已经被处理并移除
+                    continue
                 elif isinstance(expr, exp.Cube):
-                    # 处理CUBE表达式
                     self.cube_sql(expr)
-                    # CUBE被移除，不添加到group_items
+                    # 不添加到group_items中，因为已经被处理并移除
+                    continue
+                elif isinstance(expr, exp.Anonymous) and expr.this == "TIME":
+                    # 处理TIME()语法 - 使用与anonymous_sql相同的逻辑
+                    # TIME函数的已知参数名列表（这些参数即使是关键字也不应该加引号）
+                    TIME_PARAMS = {"start", "end", "column", "span", "alignment"}
+                    
+                    params = []
+                    for param_expr in expr.expressions:
+                        if isinstance(param_expr, exp.EQ):
+                            # 处理参数名
+                            left_expr = param_expr.this
+                            param_name = None
+                            
+                            # 获取参数名的原始文本
+                            if isinstance(left_expr, exp.Column) and isinstance(left_expr.this, exp.Identifier):
+                                param_name = left_expr.this.this
+                            elif isinstance(left_expr, exp.Identifier):
+                                param_name = left_expr.this
+                            elif hasattr(left_expr, 'name'):
+                                param_name = left_expr.name
+                            else:
+                                param_name = str(left_expr)
+                            
+                            # 对于TIME函数的已知参数，强制不加引号
+                            if param_name and param_name.lower() in TIME_PARAMS:
+                                key = param_name  # 直接使用参数名，不加引号
+                            else:
+                                key = self.sql(left_expr)  # 其他情况使用标准生成
+                            
+                            value = self.sql(param_expr.expression)
+                            params.append(f"{key}={value}")
+                        elif isinstance(param_expr, exp.PropertyEQ):
+                            # 对于PropertyEQ，直接使用this的名称，不加引号
+                            if isinstance(param_expr.this, exp.Identifier):
+                                key = param_expr.this.this  # 获取标识符的原始名称
+                            else:
+                                key = self.sql(param_expr.this)
+                            value = self.sql(param_expr.expression)
+                            params.append(f"{key}={value}")
+                        else:
+                            params.append(self.sql(param_expr))
+                    group_items.append(f"TIME({', '.join(params)})")
                 else:
-                    # 普通表达式，保留原始表达式对象
-                    group_items.append(expr)
+                    group_items.append(self.sql(expr))
             
-            # 检查是否有有效的GROUP BY项
-            # 如果只有GROUPING语法（GROUPING SETS/ROLLUP/CUBE）而没有普通列，返回空
-            # 如果有普通列，即使存在GROUPING语法，也要保留GROUP BY子句
-            if not group_items:
-                # 没有普通GROUP BY列，整个GROUP BY被移除
-                return ""
+            # 如果有剩余的group_items，生成GROUP BY
+            if group_items:
+                return f"{self.seg('GROUP BY')} {', '.join(group_items)}"
             else:
-                # 有普通GROUP BY列，生成GROUP BY子句
-                # 创建一个新的Group表达式并调用父类方法
-                temp_group = exp.Group(expressions=group_items)
-                return super().group_sql(temp_group)
+                # 如果所有表达式都被GROUPING处理移除了，返回空字符串
+                return ""
 
         def tablesample_sql(
             self,
@@ -3584,6 +3543,92 @@ class Yanhuang(Postgres):
             """RETURNING子句不支持"""
             raise UnsupportedError("RETURNING clause is not supported in Yanhuang SQL")
 
+        def groupingsets_sql(self, expression: exp.GroupingSets) -> str:
+            """处理GROUPING SETS语法 - 炎凰数据不支持，提供警告和替代建议"""
+            import warnings
+            
+            # 获取分组集合
+            grouping_sets = expression.expressions
+            
+            # 生成警告信息
+            warnings.warn(
+                "炎凰数据不支持GROUPING SETS语法。建议使用UNION ALL将不同的GROUP BY查询合并：\n"
+                "原SQL: GROUP BY GROUPING SETS ((a, b), (a), ())\n"
+                "替代方案: \n"
+                "  SELECT a, b, aggregates FROM table GROUP BY a, b\n"
+                "  UNION ALL\n"
+                "  SELECT a, NULL, aggregates FROM table GROUP BY a\n"
+                "  UNION ALL\n"
+                "  SELECT NULL, NULL, aggregates FROM table",
+                UserWarning,
+                stacklevel=3
+            )
+            
+            # 返回空字符串，让GROUP BY处理剩余的列
+            return ""
+
+        def rollup_sql(self, expression: exp.Rollup) -> str:
+            """处理ROLLUP语法 - 炎凰数据不支持，提供警告和替代建议"""
+            import warnings
+            
+            # 获取ROLLUP的列
+            rollup_columns = expression.expressions
+            column_names = [self.sql(col) for col in rollup_columns]
+            
+            # 生成警告信息和替代建议
+            warnings.warn(
+                f"炎凰数据不支持ROLLUP语法。建议使用UNION ALL实现层级汇总：\n"
+                f"原SQL: GROUP BY ROLLUP({', '.join(column_names)})\n"
+                f"替代方案: 使用多个GROUP BY查询的UNION ALL组合",
+                UserWarning,
+                stacklevel=3
+            )
+            
+            # 返回空字符串，让GROUP BY处理剩余的列
+            return ""
+
+        def cube_sql(self, expression: exp.Cube) -> str:
+            """处理CUBE语法 - 炎凰数据不支持，提供警告和替代建议"""
+            import warnings
+            
+            # 获取CUBE的列
+            cube_columns = expression.expressions
+            column_names = [self.sql(col) for col in cube_columns]
+            
+            # 生成警告信息和替代建议
+            warnings.warn(
+                f"炎凰数据不支持CUBE语法。建议使用UNION ALL实现多维汇总：\n"
+                f"原SQL: GROUP BY CUBE({', '.join(column_names)})\n"
+                f"替代方案: 使用所有可能GROUP BY组合的UNION ALL",
+                UserWarning,
+                stacklevel=3
+            )
+            
+            # 返回空字符串，让GROUP BY处理剩余的列
+            return ""
+
+        def grouping_function_sql(self, expression: exp.Anonymous) -> str:
+            """处理GROUPING函数 - 炎凰数据不支持，提供警告和替代建议"""
+            import warnings
+            
+            # 获取GROUPING函数的参数
+            grouping_column = expression.expressions[0] if expression.expressions else None
+            column_name = self.sql(grouping_column) if grouping_column else "unknown"
+            
+            # 生成警告信息和替代建议
+            warnings.warn(
+                f"炎凰数据不支持GROUPING函数。建议的替代方案：\n"
+                f"原SQL: GROUPING({column_name})\n"
+                f"替代方案: 使用CASE WHEN语句判断聚合级别：\n"
+                f"  CASE WHEN {column_name} IS NULL THEN 1 ELSE 0 END\n"
+                f"注意：这需要配合UNION ALL的多级GROUP BY查询使用",
+                UserWarning,
+                stacklevel=3
+            )
+            
+            # 返回一个固定值，表示不支持GROUPING函数
+            return "0  /* GROUPING function not supported, returning 0 */"
+
         def lateral_sql(self, expression: exp.Lateral) -> str:
             """处理LATERAL表达式，转换为APPLY语法"""
             # 获取cross_apply标记
@@ -3870,93 +3915,6 @@ class Yanhuang(Postgres):
             
             # 确保操作符周围有空格
             return f"{left} {op} {right}"
-
-        def groupingsets_sql(self, expression: exp.GroupingSets) -> str:
-            """处理GROUPING SETS语法，提供警告和替代建议"""
-            import warnings
-            
-            warnings.warn(
-                "炎凰数据不支持GROUPING SETS语法。建议的替代方案：\n"
-                "原SQL: GROUP BY GROUPING SETS ((a, b), (a), ())\n"
-                "替代方案: 使用UNION ALL将不同的GROUP BY查询合并：\n"
-                "SELECT a, b, ... FROM table GROUP BY a, b\n"
-                "UNION ALL\n"
-                "SELECT a, NULL, ... FROM table GROUP BY a\n"
-                "UNION ALL\n"
-                "SELECT NULL, NULL, ... FROM table\n"
-                "注意：在SELECT中使用NULL替代不参与分组的列。",
-                UserWarning
-            )
-            
-            # 移除GROUPING SETS语法，返回空字符串
-            return ""
-
-        def rollup_sql(self, expression: exp.Rollup) -> str:
-            """处理ROLLUP语法，提供警告和替代建议"""
-            import warnings
-            
-            # 获取ROLLUP的列
-            columns = [self.sql(expr) for expr in expression.expressions]
-            columns_str = ", ".join(columns)
-            
-            warnings.warn(
-                f"炎凰数据不支持ROLLUP语法。建议的替代方案：\n"
-                f"原SQL: GROUP BY ROLLUP({columns_str})\n"
-                f"替代方案: 使用UNION ALL将不同的GROUP BY查询合并，实现层级汇总。\n"
-                f"例如：对于ROLLUP(a, b)，需要以下查询的UNION ALL：\n"
-                f"1. GROUP BY a, b (明细级别)\n"
-                f"2. GROUP BY a (a级别汇总)\n"
-                f"3. 无GROUP BY (总汇总)\n"
-                f"在SELECT中对不参与分组的列使用NULL值。",
-                UserWarning
-            )
-            
-            # 移除ROLLUP语法，返回空字符串
-            return ""
-
-        def cube_sql(self, expression: exp.Cube) -> str:
-            """处理CUBE语法，提供警告和替代建议"""
-            import warnings
-            
-            # 获取CUBE的列
-            columns = [self.sql(expr) for expr in expression.expressions]
-            columns_str = ", ".join(columns)
-            
-            warnings.warn(
-                f"炎凰数据不支持CUBE语法。建议的替代方案：\n"
-                f"原SQL: GROUP BY CUBE({columns_str})\n"
-                f"替代方案: 使用UNION ALL将所有可能的分组维度组合：\n"
-                f"例如：对于CUBE(a, b)，需要以下查询的UNION ALL：\n"
-                f"1. GROUP BY a, b (明细级别)\n"
-                f"2. GROUP BY a (按a分组)\n"
-                f"3. GROUP BY b (按b分组)\n"
-                f"4. 无GROUP BY (总汇总)\n"
-                f"在SELECT中对不参与分组的列使用NULL值。",
-                UserWarning
-            )
-            
-            # 移除CUBE语法，返回空字符串
-            return ""
-
-        def grouping_function_sql(self, expression: exp.Anonymous) -> str:
-            """处理GROUPING函数，提供警告和替代建议"""
-            import warnings
-            
-            # 获取GROUPING函数的参数
-            grouping_column = expression.expressions[0] if expression.expressions else None
-            column_name = self.sql(grouping_column) if grouping_column else "unknown"
-            
-            warnings.warn(
-                f"炎凰数据不支持GROUPING函数。建议的替代方案：\n"
-                f"原SQL: GROUPING({column_name})\n"
-                f"替代方案: 使用CASE WHEN语句判断聚合级别：\n"
-                f"  CASE WHEN {column_name} IS NULL THEN 1 ELSE 0 END\n"
-                f"注意：这需要配合UNION ALL的多级GROUP BY查询使用。",
-                UserWarning
-            )
-            
-            # 返回一个固定值，表示不支持GROUPING函数
-            return "0  /* GROUPING function not supported, returning 0 */"
 
         # 虚拟继承函数映射 - 基于炎凰数据实际支持的功能
         VIRTUAL_INHERITANCE_FUNCTIONS = {
