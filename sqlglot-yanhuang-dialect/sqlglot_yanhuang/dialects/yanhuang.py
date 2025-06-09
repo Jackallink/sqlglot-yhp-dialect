@@ -712,6 +712,36 @@ def _current_user_mapping(args: t.List) -> exp.Anonymous:
     # PostgreSQL的CURRENT_USER在炎凰SQL中映射为USER()
     return exp.Anonymous(this="USER", expressions=args)
 
+def _grouping_function_warning(args: t.List) -> exp.Anonymous:
+    """处理GROUPING函数的特殊警告和替代建议
+    
+    Args:
+        args: GROUPING函数的参数列表
+        
+    Returns:
+        替换为固定值"0"的Anonymous表达式，并产生详细警告
+    """
+    import warnings
+    
+    # 获取GROUPING函数的参数
+    grouping_column = args[0] if args else None
+    column_name = str(grouping_column) if grouping_column else "unknown"
+    
+    # 生成详细的警告信息和替代建议
+    warnings.warn(
+        f"炎凰数据不支持GROUPING函数。建议的替代方案：\n"
+        f"原SQL: GROUPING({column_name})\n"
+        f"替代方案: 使用CASE WHEN语句判断聚合级别：\n"
+        f"  CASE WHEN {column_name} IS NULL THEN 1 ELSE 0 END\n"
+        f"注意：这需要配合UNION ALL的多级GROUP BY查询使用",
+        UserWarning,
+        stacklevel=3
+    )
+    
+    # 返回固定值"0"，表示GROUPING函数的默认行为
+    return exp.Literal.string("0")
+
+
 def _unsupported_function_warning(func_name: str, func_type: str, args: t.List) -> exp.Anonymous:
     """为不支持的函数生成告警并返回原函数调用
     
@@ -2559,6 +2589,49 @@ class Yanhuang(Postgres):
             """处理匿名函数，基于炎凰数据实际支持的功能进行虚拟继承函数映射"""
             func_name = expression.this
             
+            # 特殊处理TIME函数 - 确保参数格式正确
+            if func_name == "TIME":
+                # TIME函数的已知参数名列表（这些参数即使是关键字也不应该加引号）
+                TIME_PARAMS = {"start", "end", "column", "span", "alignment"}
+                
+                params = []
+                for param_expr in expression.expressions:
+                    if isinstance(param_expr, exp.EQ):
+                        # 处理参数名
+                        left_expr = param_expr.this
+                        param_name = None
+                        
+                        # 获取参数名的原始文本
+                        if isinstance(left_expr, exp.Column) and isinstance(left_expr.this, exp.Identifier):
+                            param_name = left_expr.this.this
+                        elif isinstance(left_expr, exp.Identifier):
+                            param_name = left_expr.this
+                        elif hasattr(left_expr, 'name'):
+                            param_name = left_expr.name
+                        else:
+                            param_name = str(left_expr)
+                        
+                        # 对于TIME函数的已知参数，强制不加引号
+                        if param_name and param_name.lower() in TIME_PARAMS:
+                            key = param_name  # 直接使用参数名，不加引号
+                        else:
+                            key = self.sql(left_expr)  # 其他情况使用标准生成
+                        
+                        value = self.sql(param_expr.expression)
+                        params.append(f"{key}={value}")
+                    elif isinstance(param_expr, exp.PropertyEQ):
+                        # 对于PropertyEQ，直接使用this的名称，不加引号
+                        if isinstance(param_expr.this, exp.Identifier):
+                            key = param_expr.this.this  # 获取标识符的原始名称
+                        else:
+                            key = self.sql(param_expr.this)
+                        value = self.sql(param_expr.expression)
+                        params.append(f"{key}={value}")
+                    else:
+                        params.append(self.sql(param_expr))
+                
+                return f"TIME({', '.join(params)})"
+            
             # 虚拟继承函数处理 - 基于炎凰数据实际支持的功能
             if hasattr(self, 'VIRTUAL_INHERITANCE_FUNCTIONS') and func_name in self.VIRTUAL_INHERITANCE_FUNCTIONS:
                 handler = self.VIRTUAL_INHERITANCE_FUNCTIONS[func_name]
@@ -3057,12 +3130,29 @@ class Yanhuang(Postgres):
                 else:
                     group_items.append(self.sql(expr))
             
-            # 如果有剩余的group_items，生成GROUP BY
-            if group_items:
-                return f"{self.seg('GROUP BY')} {', '.join(group_items)}"
-            else:
-                # 如果所有表达式都被GROUPING处理移除了，返回空字符串
+            # 检查是否有有效的GROUP BY项
+            # 如果只有GROUPING语法（GROUPING SETS/ROLLUP/CUBE）而没有普通列，返回空
+            # 如果有普通列，即使存在GROUPING语法，也要保留GROUP BY子句
+            if not group_items:
+                # 没有普通GROUP BY列，整个GROUP BY被移除
                 return ""
+            else:
+                # 有普通GROUP BY列，生成GROUP BY子句
+                # 收集正确的表达式对象以使用SQLGlot标准格式化
+                valid_expressions = []
+                for expr in expression.expressions:
+                    # 跳过GROUPING语法
+                    if isinstance(expr, (exp.Rollup, exp.Cube, exp.GroupingSets)):
+                        continue
+                    else:
+                        valid_expressions.append(expr)
+                
+                if valid_expressions:
+                    # 使用SQLGlot标准的格式化方法确保正确的空格
+                    expr_sqls = [self.sql(expr) for expr in valid_expressions]
+                    return self.seg("GROUP BY") + " " + ", ".join(expr_sqls)
+                else:
+                    return ""
 
         def tablesample_sql(
             self,
@@ -3626,8 +3716,8 @@ class Yanhuang(Postgres):
                 stacklevel=3
             )
             
-            # 返回一个固定值，表示不支持GROUPING函数
-            return "0  /* GROUPING function not supported, returning 0 */"
+            # 返回一个固定值"0"，与主目录版本保持一致
+            return "0"
 
         def lateral_sql(self, expression: exp.Lateral) -> str:
             """处理LATERAL表达式，转换为APPLY语法"""

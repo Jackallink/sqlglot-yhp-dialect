@@ -650,10 +650,7 @@ class TestYanhuangComprehensive(Validator):
         self.validate_identity("PIVOT cities ON year IN (2000, 2020) USING SUM(population) GROUP BY country ORDER BY country DESC")
         
         # PIVOT with TIME()
-        self.validate_transform(
-            "PIVOT cities ON country USING SUM(population) GROUP BY TIME(span='5y', start='1990-01-01T00:00:00', end='2020-01-01T00:00:00') ORDER BY _time",
-            "PIVOT cities ON country USING SUM(population) GROUP BY TIME(span = '5y', start = '1990-01-01T00:00:00', \"end\" = '2020-01-01T00:00:00') ORDER BY _time"
-        )
+        self.validate_identity("PIVOT cities ON country USING SUM(population) GROUP BY TIME(span='5y', start='1990-01-01T00:00:00', end='2020-01-01T00:00:00') ORDER BY _time")
 
     def test_cte_functionality(self):
         """CTE功能测试"""
