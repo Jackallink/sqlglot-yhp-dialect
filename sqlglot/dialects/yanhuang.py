@@ -2147,10 +2147,10 @@ class Yanhuang(Postgres):
             exp.DataType.Type.VARBINARY: "string",  # VARBINARY映射为string
             exp.DataType.Type.ROWVERSION: "string",  # ROWVERSION映射为string
             exp.DataType.Type.TIMETZ: "string",  # 带时区的TIME映射为string
-            exp.DataType.Type.TIMESTAMPTZ: "string",  # 带时区的TIMESTAMP映射为string
+            exp.DataType.Type.TIMESTAMPTZ: "string",  # 带时区的TIMESTAMP映射为string（移除WITH TIME ZONE）
             exp.DataType.Type.DATE: "string",  # DATE映射为string（炎凰数据通过字符串处理日期）
             exp.DataType.Type.TIME: "string",  # TIME映射为string
-            exp.DataType.Type.TIMESTAMP: "string",  # TIMESTAMP映射为string
+            # 移除TIMESTAMP映射 - 炎凰数据原生支持TIMESTAMP字面量语法
         }
 
         TRANSFORMS = {
@@ -2470,17 +2470,29 @@ class Yanhuang(Postgres):
             if expression.is_type(exp.DataType.Type.JSON):
                 # Redshift doesn't support a JSON type, so casting to it is treated as a noop
                 return self.sql(expression, "this")
+            
+            # 炎凰数据特殊处理：将CAST(string AS TIMESTAMP)转换为TIMESTAMP字面量语法
+            if (expression.is_type(exp.DataType.Type.TIMESTAMP) and 
+                isinstance(expression.this, exp.Literal) and 
+                isinstance(expression.this.this, str)):
+                
+                # 这是CAST('...' AS TIMESTAMP)形式，转换为TIMESTAMP '...'字面量
+                timestamp_value = expression.this.this
+                return f"TIMESTAMP '{timestamp_value}'"
 
             return super().cast_sql(expression, safe_prefix=safe_prefix)
 
         def datatype_sql(self, expression: exp.DataType) -> str:
             """
-            Redshift converts the `TEXT` data type to `VARCHAR(255)` by default when people more generally mean
-            VARCHAR of max length which is `VARCHAR(max)` in Redshift. Therefore if we get a `TEXT` data type
-            without precision we convert it to `VARCHAR(max)` and if it does have precision then we just convert
-            `TEXT` to `VARCHAR`.
+            炎凰数据的数据类型处理：
+            1. TEXT类型转换为VARCHAR(MAX)（仅当TYPE_MAPPING中没有映射时）
+            2. TIMESTAMPTZ/TIMETZ不添加"WITH TIME ZONE"语法（炎凰数据不支持）
+            3. 兼容性检查
             """
-            if expression.is_type("text"):
+            # 对于TYPE_MAPPING中有明确映射的类型，优先使用映射，跳过特殊处理
+            type_value = expression.this
+            if type_value not in self.TYPE_MAPPING and expression.is_type("text"):
+                # 只对没有明确映射的TEXT类型进行VARCHAR(MAX)转换
                 expression.set("this", exp.DataType.Type.VARCHAR)
                 precision = expression.args.get("expressions")
 
@@ -2493,7 +2505,7 @@ class Yanhuang(Postgres):
                 'UUID', 'INET', 'CIDR', 'MACADDR', 'TSVECTOR'
             }
             
-            # 获取数据类型名称
+            # 修复：正确获取数据类型名称
             type_name = expression.this.name if hasattr(expression.this, 'name') else str(expression.this)
             
             if type_name.upper() in unsupported_types:
@@ -2501,8 +2513,17 @@ class Yanhuang(Postgres):
                     f"{type_name} data type",
                     "basic types (INT, STRING, FLOAT, DOUBLE, BOOLEAN)"
                 )
-
-            return super().datatype_sql(expression)
+            
+            # 炎凰数据特殊处理：阻止TIMESTAMPTZ/TIMETZ生成"WITH TIME ZONE"
+            # 临时禁用TZ_TO_WITH_TIME_ZONE，让父类正常处理类型映射但不添加WITH TIME ZONE
+            original_tz_to_with_time_zone = self.TZ_TO_WITH_TIME_ZONE
+            self.TZ_TO_WITH_TIME_ZONE = False
+            try:
+                result = super().datatype_sql(expression)
+            finally:
+                self.TZ_TO_WITH_TIME_ZONE = original_tz_to_with_time_zone
+                
+            return result
 
         def alterset_sql(self, expression: exp.AlterSet) -> str:
             exprs = self.expressions(expression, flat=True)
@@ -3609,24 +3630,6 @@ class Yanhuang(Postgres):
                 alias_sql = ""
             
             return f"{apply_type} {self.sql(table_func)}{alias_sql}"
-
-        def datatype_sql(self, expression: exp.DataType) -> str:
-            """检查不支持的数据类型"""
-            unsupported_types = {
-                'BYTEA', 'JSONB', 'HSTORE', 'ARRAY', 'ENUM', 
-                'UUID', 'INET', 'CIDR', 'MACADDR', 'TSVECTOR'
-            }
-            
-            # 修复：正确获取数据类型名称
-            type_name = expression.this.name if hasattr(expression.this, 'name') else str(expression.this)
-            
-            if type_name.upper() in unsupported_types:
-                self._warn_compatibility(
-                    f"{type_name} data type",
-                    "basic types (INT, STRING, FLOAT, DOUBLE, BOOLEAN)"
-                )
-                
-            return super().datatype_sql(expression)
 
         def distinct_sql(self, expression: exp.Distinct) -> str:
             """检查聚合函数中的DISTINCT使用"""

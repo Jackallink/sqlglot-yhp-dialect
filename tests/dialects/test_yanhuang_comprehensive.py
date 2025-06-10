@@ -444,6 +444,55 @@ class TestYanhuangComprehensive(Validator):
         # 注意：'M'可能被生成为'm'，这里接受两种形式
         self.assertTrue("'M'" in generated or "'m'" in generated or "'month'" in generated)
 
+    def test_timestamp_literal_support(self):
+        """测试TIMESTAMP字面量语法的支持"""
+        
+        # PostgreSQL的各种TIMESTAMP语法都应该转换为一致的炎凰字面量语法
+        test_cases = [
+            (
+                "SELECT TIMESTAMP '2024-01-01T00:00:00' as ts",
+                "SELECT TIMESTAMP '2024-01-01T00:00:00' AS ts"
+            ),
+            (
+                "SELECT CAST('2024-01-01T00:00:00' AS TIMESTAMP) as ts",
+                "SELECT TIMESTAMP '2024-01-01T00:00:00' AS ts"
+            ),
+            (
+                "SELECT '2024-01-01T00:00:00'::TIMESTAMP as ts",
+                "SELECT TIMESTAMP '2024-01-01T00:00:00' AS ts"
+            ),
+            # 验证带时区的TIMESTAMP映射为string（炎凰数据不支持WITH TIME ZONE语法）
+            (
+                "SELECT TIMESTAMPTZ '2024-01-01T00:00:00+08:00' as ts",
+                "SELECT CAST('2024-01-01T00:00:00+08:00' AS string) AS ts"
+            ),
+        ]
+        
+        for input_sql, expected_sql in test_cases:
+            with self.subTest(input_sql=input_sql):
+                self.validate_transform(input_sql, expected_sql)
+        
+        # 验证TIMESTAMP字面量与其他时间类型的区别
+        # DATE和TIME应该映射为string，TIMESTAMP保持原生字面量语法
+        type_tests = [
+            (
+                "SELECT DATE '2024-01-01' as d",
+                "SELECT CAST('2024-01-01' AS string) AS d"
+            ),
+            (
+                "SELECT TIME '12:00:00' as t",
+                "SELECT CAST('12:00:00' AS string) AS t"
+            ),
+            (
+                "SELECT TIMESTAMP '2024-01-01T00:00:00' as ts",
+                "SELECT TIMESTAMP '2024-01-01T00:00:00' AS ts"
+            ),
+        ]
+        
+        for input_sql, expected_sql in type_tests:
+            with self.subTest(input_sql=input_sql):
+                self.validate_transform(input_sql, expected_sql)
+
     def test_aggregate_functions(self):
         """聚合函数测试"""
         # 标准聚合函数

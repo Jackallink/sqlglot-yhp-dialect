@@ -19,7 +19,7 @@
     print(result)  # PostgreSQL LATERAL JOIN 转换为炎凰数据 OUTER APPLY
 """
 
-__version__ = "1.0.0"
+__version__ = "1.2.0"
 __author__ = "炎凰数据团队"
 
 import sqlglot
